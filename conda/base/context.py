@@ -39,7 +39,7 @@ _platform_map = {
     'darwin': 'osx',
     'win32': 'win',
 }
-non_x86_linux_machines = {'armv6l', 'armv7l', 'ppc64le'}
+non_x86_linux_machines = {'armv6l', 'armv7l', 'ppc64le', 'aarch64'}
 _arch_names = {
     32: 'x86',
     64: 'x86_64',

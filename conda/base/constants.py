@@ -21,6 +21,7 @@ class Arch(Enum):
     armv6l = 'armv6l'
     armv7l = 'armv7l'
     ppc64le = 'ppc64le'
+    aarch64 = 'aarch64'
 
     @classmethod
     def from_sys(cls):
@@ -76,6 +77,7 @@ PLATFORM_DIRECTORIES = ("linux-64",
                         "win-32",
                         "osx-64",
                         "linux-ppc64le",
+                        "linux-aarch64",
                         "noarch",
                         )
 
