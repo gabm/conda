@@ -460,13 +460,13 @@ def install_actions(prefix, index, specs, force=False, only_names=None, always_c
 
     # Only add a conda spec if conda and conda-env are not in the specs.
     # Also skip this step if we're offline.
-    root_only = ('conda', 'conda-env')
+    root_only = ('conda')
     mss = [MatchSpec(s) for s in specs if s.startswith(root_only)]
     mss = [ms for ms in mss if ms.name in root_only]
     if is_root_prefix(prefix):
         if context.auto_update_conda and not context.offline and not mss:
             specs.append('conda')
-            specs.append('conda-env')
+            #specs.append('conda-env')
     elif basename(prefix).startswith('_'):
         # anything (including conda) can be installed into environments
         # starting with '_', mainly to allow conda-build to build conda
