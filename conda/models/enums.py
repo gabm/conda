@@ -12,6 +12,7 @@ class Arch(Enum):
     armv6l = 'armv6l'
     armv7l = 'armv7l'
     ppc64le = 'ppc64le'
+    aarch64 = 'aarch64'
     z = 'z'
 
     @classmethod
