@@ -4,55 +4,35 @@
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
 
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import errno
 import logging
 import os
-import shutil
-import tarfile
-import tempfile
+import re
 from difflib import get_close_matches
 from os.path import abspath, basename, exists, isdir, join
 
-from .. import text_type
+from . import common
+from .find_commands import find_executable
 from .._vendor.auxlib.ish import dals
-from ..api import get_index
 from ..base.constants import ROOT_ENV_NAME
 from ..base.context import check_write, context
-from ..cli import common
-from ..cli.find_commands import find_executable
-from ..exceptions import (CondaAssertionError, CondaEnvironmentNotFoundError,
-                          CondaFileNotFoundError, CondaIOError, CondaImportError, CondaOSError,
+from ..common.compat import on_win, text_type
+from ..core.index import get_index
+from ..core.linked_data import is_linked, linked as install_linked
+from ..exceptions import (CondaCorruptEnvironmentError, CondaEnvironmentNotFoundError,
+                          CondaIOError, CondaImportError, CondaOSError,
                           CondaRuntimeError, CondaSystemExit, CondaValueError,
                           DirectoryNotFoundError, DryRunExit, LockError, NoPackagesFoundError,
                           PackageNotFoundError, TooManyArgumentsError, UnsatisfiableError)
-from ..install import is_linked, linked as install_linked, name_dist
 from ..misc import append_env, clone_env, explicit, touch_nonadmin
-from ..plan import (add_defaults_to_specs, display_actions, execute_actions, get_pinned_specs,
-                    install_actions, is_root_prefix, nothing_to_do, revert_actions)
+from ..models.channel import prioritize_channels
+from ..plan import (display_actions, execute_actions, get_pinned_specs,
+                    is_root_prefix, nothing_to_do, revert_actions, install_actions_list)
 from ..resolve import Resolve
-from ..utils import on_win
 
 log = logging.getLogger(__name__)
-
-
-def install_tar(prefix, tar_path, verbose=False):
-    if not exists(tar_path):
-        raise CondaFileNotFoundError(tar_path)
-    tmp_dir = tempfile.mkdtemp()
-    t = tarfile.open(tar_path, 'r')
-    t.extractall(path=tmp_dir)
-    t.close()
-
-    paths = []
-    for root, dirs, files in os.walk(tmp_dir):
-        for fn in files:
-            if fn.endswith('.tar.bz2'):
-                paths.append(join(root, fn))
-
-    explicit(paths, prefix, verbose=verbose)
-    shutil.rmtree(tmp_dir)
 
 
 def check_prefix(prefix, json=False):
@@ -136,7 +116,7 @@ def install(args, parser, command='install'):
     """
     conda install, conda update, and conda create
     """
-    context.validate_all()
+    context.validate_configuration()
     newenv = bool(command == 'create')
     isupdate = bool(command == 'update')
     isinstall = bool(command == 'install')
@@ -154,12 +134,12 @@ def install(args, parser, command='install'):
 # $ conda update --prefix %s anaconda
 """ % prefix)
 
-    linked = install_linked(prefix)
-    lnames = {name_dist(d) for d in linked}
+    linked_dists = install_linked(prefix)
+    linked_names = tuple(ld.quad[0] for ld in linked_dists)
     if isupdate and not args.all:
         for name in args.packages:
             common.arg2spec(name, json=context.json, update=True)
-            if name not in lnames:
+            if name not in linked_names and common.prefix_if_in_private_env(name) is None:
                 raise PackageNotFoundError(name, "Package '%s' is not installed in %s" %
                                            (name, prefix))
 
@@ -191,10 +171,10 @@ def install(args, parser, command='install'):
             explicit(specs, prefix, verbose=not context.quiet, index_args=index_args)
             return
     elif getattr(args, 'all', False):
-        if not linked:
+        if not linked_dists:
             raise PackageNotFoundError('', "There are no packages installed in the "
                                        "prefix %s" % prefix)
-        specs.extend(nm for nm in lnames)
+        specs.extend(d.quad[0] for d in linked_dists)
     specs.extend(common.specs_from_args(args.packages, json=context.json))
 
     if isinstall and args.revision:
@@ -212,13 +192,6 @@ def install(args, parser, command='install'):
             raise CondaValueError("cannot mix specifications with conda package"
                                   " filenames")
 
-    # handle tar file containing conda packages
-    if len(args.packages) == 1:
-        tar_path = args.packages[0]
-        if tar_path.endswith('.tar'):
-            install_tar(prefix, tar_path, verbose=not context.quiet)
-            return
-
     if newenv and args.clone:
         package_diff = set(args.packages) - set(default_packages)
         if package_diff:
@@ -228,33 +201,35 @@ def install(args, parser, command='install'):
         clone(args.clone, prefix, json=context.json, quiet=context.quiet, index_args=index_args)
         append_env(prefix)
         touch_nonadmin(prefix)
-        if not context.json:
+        if not context.json and not context.quiet:
             print(print_activate(args.name if args.name else prefix))
         return
 
-    index = get_index(channel_urls=index_args['channel_urls'], prepend=index_args['prepend'],
-                      platform=None, use_local=index_args['use_local'],
-                      use_cache=index_args['use_cache'], unknown=index_args['unknown'],
-                      prefix=prefix)
+    index = get_index(channel_urls=index_args['channel_urls'],
+                      prepend=index_args['prepend'], platform=None,
+                      use_local=index_args['use_local'], use_cache=index_args['use_cache'],
+                      unknown=index_args['unknown'], prefix=prefix)
     r = Resolve(index)
     ospecs = list(specs)
-    add_defaults_to_specs(r, linked, specs, update=isupdate)
 
     # Don't update packages that are already up-to-date
     if isupdate and not (args.all or args.force):
         orig_packages = args.packages[:]
-        installed_metadata = [is_linked(prefix, dist) for dist in linked]
+        installed_metadata = [is_linked(prefix, dist) for dist in linked_dists]
         for name in orig_packages:
+            private_env = common.prefix_if_in_private_env(name)
+            if private_env is not None:
+                linked_dists = install_linked(private_env)
+                installed_metadata = [is_linked(private_env, dist) for dist in linked_dists]
+
             vers_inst = [m['version'] for m in installed_metadata if m['name'] == name]
             build_inst = [m['build_number'] for m in installed_metadata if m['name'] == name]
             channel_inst = [m['channel'] for m in installed_metadata if m['name'] == name]
 
-            try:
-                assert len(vers_inst) == 1, name
-                assert len(build_inst) == 1, name
-                assert len(channel_inst) == 1, name
-            except AssertionError as e:
-                raise CondaAssertionError(text_type(e))
+            if len(vers_inst) != 1 or len(build_inst) != 1 or len(channel_inst) != 1:
+                msg = """It seems like there is a package conflict in the conda-meta directory.
+        Please remove duplicates of %s package""" % name
+                raise CondaCorruptEnvironmentError(msg)
 
             pkgs = sorted(r.get_pkgs(name))
             if not pkgs:
@@ -296,16 +271,15 @@ def install(args, parser, command='install'):
 
     try:
         if isinstall and args.revision:
-            actions = revert_actions(prefix, get_revision(args.revision), index)
+            action_set = [revert_actions(prefix, get_revision(args.revision), index)]
         else:
             with common.json_progress_bars(json=context.json and not context.quiet):
-                actions = install_actions(prefix, index, specs,
-                                          force=args.force,
-                                          only_names=only_names,
-                                          pinned=args.pinned,
-                                          always_copy=context.always_copy,
-                                          minimal_hint=args.alt_hint,
-                                          update_deps=context.update_dependencies)
+                _channel_priority_map = prioritize_channels(index_args['channel_urls'])
+                action_set = install_actions_list(
+                    prefix, index, specs, force=args.force, only_names=only_names,
+                    pinned=args.pinned, always_copy=context.always_copy,
+                    minimal_hint=args.alt_hint, update_deps=context.update_dependencies,
+                    channel_priority_map=_channel_priority_map, is_update=isupdate)
     except NoPackagesFoundError as e:
         error_message = [e.args[0]]
 
@@ -369,63 +343,73 @@ def install(args, parser, command='install'):
             raise CondaImportError(text_type(e))
         raise
 
-    if nothing_to_do(actions) and not newenv:
-        from .main_list import print_packages
-
-        if not context.json:
-            regex = '^(%s)$' % '|'.join(s.split()[0] for s in ospecs)
-            print('\n# All requested packages already installed.')
-            print_packages(prefix, regex)
-        else:
-            common.stdout_json_success(
-                message='All requested packages already installed.')
-        return
-    elif newenv:
-        # needed in the case of creating an empty env
-        from ..instructions import LINK, UNLINK, SYMLINK_CONDA
-        if not actions[LINK] and not actions[UNLINK]:
-            actions[SYMLINK_CONDA] = [context.root_dir]
-
     if not context.json:
-        print()
-        print("Package plan for installation in environment %s:" % prefix)
-        display_actions(actions, index, show_channel_urls=context.show_channel_urls)
+        if any(nothing_to_do(actions) for actions in action_set) and not newenv:
+            from .main_list import print_packages
 
-    if command in {'install', 'update'}:
-        check_write(command, prefix)
+            if not context.json:
+                spec_regex = r'^(%s)$' % re.escape('|'.join(s.split()[0] for s in ospecs))
+                print('\n# All requested packages already installed.')
+                for action in action_set:
+                    print_packages(action["PREFIX"], spec_regex)
+            else:
+                common.stdout_json_success(
+                    message='All requested packages already installed.')
+            return
 
-    if not context.json:
+        for actions in action_set:
+            print()
+            print("Package plan for installation in environment %s:" % actions["PREFIX"])
+            display_actions(actions, index, show_channel_urls=context.show_channel_urls)
+            # TODO: this is where the transactions should be instantiated
         common.confirm_yn(args)
+
     elif args.dry_run:
-        common.stdout_json_success(actions=actions, dry_run=True)
+        common.stdout_json_success(actions=action_set, dry_run=True)
         raise DryRunExit()
 
-    with common.json_progress_bars(json=context.json and not context.quiet):
-        try:
-            execute_actions(actions, index, verbose=not context.quiet)
-            if not (command == 'update' and args.all):
-                try:
-                    with open(join(prefix, 'conda-meta', 'history'), 'a') as f:
-                        f.write('# %s specs: %s\n' % (command, specs))
-                except IOError as e:
-                    if e.errno == errno.EACCES:
-                        log.debug("Can't write the history file")
-                    else:
-                        raise CondaIOError("Can't write the history file", e)
+    for actions in action_set:
+        if newenv:
+            # needed in the case of creating an empty env
+            from ..instructions import LINK, UNLINK, SYMLINK_CONDA
+            if not actions[LINK] and not actions[UNLINK]:
+                actions[SYMLINK_CONDA] = [context.root_dir]
 
-        except RuntimeError as e:
-            if len(e.args) > 0 and "LOCKERROR" in e.args[0]:
-                raise LockError('Already locked: %s' % text_type(e))
-            else:
-                raise CondaRuntimeError('RuntimeError: %s' % e)
-        except SystemExit as e:
-            raise CondaSystemExit('Exiting', e)
+        if command in {'install', 'update'}:
+            check_write(command, prefix)
 
-    if newenv:
-        append_env(prefix)
-        touch_nonadmin(prefix)
-        if not context.json:
-            print(print_activate(args.name if args.name else prefix))
+        # if not context.json:
+        #     common.confirm_yn(args)
+        # elif args.dry_run:
+        #     common.stdout_json_success(actions=actions, dry_run=True)
+        #     raise DryRunExit()
 
-    if context.json:
-        common.stdout_json_success(actions=actions)
+        with common.json_progress_bars(json=context.json and not context.quiet):
+            try:
+                execute_actions(actions, index, verbose=not context.quiet)
+                if not (command == 'update' and args.all):
+                    try:
+                        with open(join(prefix, 'conda-meta', 'history'), 'a') as f:
+                            f.write('# %s specs: %s\n' % (command, ','.join(specs)))
+                    except IOError as e:
+                        if e.errno == errno.EACCES:
+                            log.debug("Can't write the history file")
+                        else:
+                            raise CondaIOError("Can't write the history file", e)
+
+            except RuntimeError as e:
+                if len(e.args) > 0 and "LOCKERROR" in e.args[0]:
+                    raise LockError('Already locked: %s' % text_type(e))
+                else:
+                    raise CondaRuntimeError('RuntimeError: %s' % e)
+            except SystemExit as e:
+                raise CondaSystemExit('Exiting', e)
+
+        if newenv:
+            append_env(prefix)
+            touch_nonadmin(prefix)
+            if not context.json:
+                print(print_activate(args.name if args.name else prefix))
+
+        if context.json:
+            common.stdout_json_success(actions=actions)

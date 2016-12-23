@@ -1,17 +1,49 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import logging
-import sys
 from contextlib import contextmanager
+import logging
 from logging import CRITICAL, Formatter, NOTSET, StreamHandler, WARN, getLogger
+import os
+from os import chdir, getcwd
+import sys
 
+from .compat import StringIO
 from .._vendor.auxlib.logz import NullHandler
-from ..compat import StringIO
 
 log = getLogger(__name__)
 
 _FORMATTER = Formatter("%(levelname)s %(name)s:%(funcName)s(%(lineno)d): %(message)s")
+
+
+@contextmanager
+def env_var(name, value, callback=None):
+    # NOTE: will likely want to call reset_context() when using this function, so pass
+    #       it as callback
+    name, value = str(name), str(value)
+    saved_env_var = os.environ.get(name)
+    try:
+        os.environ[name] = value
+        if callback:
+            callback()
+        yield
+    finally:
+        if saved_env_var:
+            os.environ[name] = saved_env_var
+        else:
+            del os.environ[name]
+        if callback:
+            callback()
+
+
+@contextmanager
+def cwd(directory):
+    saved_cwd = getcwd()
+    try:
+        chdir(directory)
+        yield
+    finally:
+        chdir(saved_cwd)
 
 
 @contextmanager
@@ -30,7 +62,7 @@ def captured():
     finally:
         c.stdout, c.stderr = outfile.getvalue(), errfile.getvalue()
         sys.stdout, sys.stderr = saved_stdout, saved_stderr
-        log.info("stderr and stdout yielded back")
+        log.info("stderr and stdout yielding back")
 
 
 @contextmanager
@@ -105,7 +137,7 @@ def stderr_log_level(level, logger_name=None):
             logr.propagate = _prpgt
 
 
-def attach_stderr_handler(level=WARN, logger_name=None, propagate=False):
+def attach_stderr_handler(level=WARN, logger_name=None, propagate=False, formatter=None):
     # get old stderr logger
     logr = getLogger(logger_name)
     old_stderr_handler = next((handler for handler in logr.handlers if handler.name == 'stderr'),
@@ -115,7 +147,7 @@ def attach_stderr_handler(level=WARN, logger_name=None, propagate=False):
     new_stderr_handler = StreamHandler(sys.stderr)
     new_stderr_handler.name = 'stderr'
     new_stderr_handler.setLevel(NOTSET)
-    new_stderr_handler.setFormatter(_FORMATTER)
+    new_stderr_handler.setFormatter(formatter or _FORMATTER)
 
     # do the switch
     with _logger_lock():

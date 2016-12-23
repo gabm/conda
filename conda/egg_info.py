@@ -2,18 +2,19 @@
 Functions related to core conda functionality that relates to manually
 installed Python packages, e.g. using "python setup.py install", or "pip".
 """
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 from io import open
 import os
+from os.path import isdir, isfile, join
 import re
 import sys
-from os.path import isdir, isfile, join
 
-from .compat import itervalues
-from .install import linked_data
+from .common.compat import itervalues, on_win
+from .core.linked_data import linked_data
 from .misc import rel_path
-from .utils import on_win
+from .models.dist import Dist
+
 
 def get_site_packages_dir(installed_pkgs):
     for info in itervalues(installed_pkgs):
@@ -86,7 +87,7 @@ def get_egg_info(prefix, all_pkgs=False):
             except UnicodeDecodeError:
                 dist = None
             if dist:
-                res.add(dist)
+                res.add(Dist(dist))
     return res
 
 

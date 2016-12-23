@@ -4,19 +4,21 @@
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
 
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
-import logging
-import re
 from argparse import RawDescriptionHelpFormatter
+import logging
 from os.path import isdir, isfile
+import re
 
 from .common import (add_parser_help, add_parser_json, add_parser_prefix,
                      add_parser_show_channel_urls, disp_features, stdout_json)
+from ..base.constants import DEFAULTS, UNKNOWN_CHANNEL
 from ..base.context import context
+from ..common.compat import text_type
+from ..core.linked_data import is_linked, linked, linked_data
 from ..egg_info import get_egg_info
 from ..exceptions import CondaEnvironmentNotFoundError, CondaFileNotFoundError
-from ..install import dist2quad, is_linked, linked, linked_data, name_dist
 
 descr = "List linked packages in a conda environment."
 
@@ -111,8 +113,8 @@ def print_export_header():
 
 def get_packages(installed, regex):
     pat = re.compile(regex, re.I) if regex else None
-    for dist in sorted(installed, key=lambda x: name_dist(x).lower()):
-        name = name_dist(dist)
+    for dist in sorted(installed, key=lambda x: x.quad[0].lower()):
+        name = dist.quad[0]
         if pat and pat.search(name) is None:
             continue
 
@@ -128,7 +130,7 @@ def list_packages(prefix, installed, regex=None, format='human',
             result.append(dist)
             continue
         if format == 'export':
-            result.append('='.join(dist2quad(dist)[:3]))
+            result.append('='.join(dist.quad[:3]))
             continue
 
         try:
@@ -138,12 +140,12 @@ def list_packages(prefix, installed, regex=None, format='human',
             disp = '%(name)-25s %(version)-15s %(build)15s' % info
             disp += '  %s' % disp_features(features)
             schannel = info.get('schannel')
-            if show_channel_urls or show_channel_urls is None and schannel != 'defaults':
+            if show_channel_urls or show_channel_urls is None and schannel != DEFAULTS:
                 disp += '  %s' % schannel
             result.append(disp)
         except (AttributeError, IOError, KeyError, ValueError) as e:
             log.debug("exception for dist %s:\n%r", dist, e)
-            result.append('%-25s %-15s %15s' % dist2quad(dist)[:3])
+            result.append('%-25s %-15s %15s' % tuple(dist.quad[:3]))
 
     return res, result
 
@@ -170,7 +172,7 @@ def print_packages(prefix, regex=None, format='human', piplist=False,
     exitcode, output = list_packages(prefix, installed, regex, format=format,
                                      show_channel_urls=show_channel_urls)
     if not json:
-        print('\n'.join(output))
+        print('\n'.join(map(text_type, output)))
     else:
         stdout_json(output)
     return exitcode
@@ -183,7 +185,7 @@ def print_explicit(prefix, add_md5=False):
     print("@EXPLICIT")
     for meta in sorted(linked_data(prefix).values(), key=lambda x: x['name']):
         url = meta.get('url')
-        if not url or url.startswith('<unknown>'):
+        if not url or url.startswith(UNKNOWN_CHANNEL):
             print('# no URL for: %s' % meta['fn'])
             continue
         md5 = meta.get('md5')
@@ -198,7 +200,6 @@ def execute(args, parser):
 
     if args.revisions:
         from conda.history import History
-
         h = History(prefix)
         if isfile(h.path):
             if not context.json:
@@ -206,7 +207,7 @@ def execute(args, parser):
             else:
                 stdout_json(h.object_log())
         else:
-            raise CondaFileNotFoundError(h.path, "No revision log found: %s\n" % h.path)
+            raise CondaFileNotFoundError(h.path)
         return
 
     if args.explicit:

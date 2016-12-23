@@ -1,15 +1,24 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import, division, print_function, unicode_literals
 
+from datetime import timedelta
 import logging
-import os
-import sys
-from conda._vendor.auxlib.ish import dals
 from logging import getLogger
+import sys
 from traceback import format_exc
 
-from . import CondaError, text_type, CondaExitZero
-from .compat import iteritems, iterkeys
+from conda.base.constants import PathConflict
+from . import CondaError, CondaExitZero, text_type, CondaMultiError
+from ._vendor.auxlib.entity import EntityEncoder
+from ._vendor.auxlib.ish import dals
+from .common.compat import iteritems, iterkeys, string_types
+from .common.signals import get_signal_name
+
+try:
+    from cytoolz.itertoolz import groupby
+except ImportError:
+    from ._vendor.toolz.itertoolz import groupby  # NOQA
+
 log = logging.getLogger(__name__)
 
 
@@ -28,6 +37,14 @@ class CommandArgumentError(ArgumentError):
     def __init__(self, message, **kwargs):
         command = ' '.join(sys.argv)
         super(CommandArgumentError, self).__init__(message, command=command, **kwargs)
+
+
+class CondaSignalInterrupt(CondaError):
+    def __init__(self, signum):
+        signal_name = get_signal_name(signum)
+        super(CondaSignalInterrupt, self).__init__("Signal interrupt %(signal_name)s",
+                                                   signal_name=signal_name,
+                                                   signum=signum)
 
 
 class ArgumentNotFoundError(ArgumentError):
@@ -58,9 +75,94 @@ class TooFewArgumentsError(ArgumentError):
         self.received = received
         self.optional_message = optional_message
 
-        msg = 'Too few arguments: %s. Got %s arguments and expected %s.' %\
-              (optional_message, received, expected)
+        msg = ('Too few arguments: %s. Got %s arguments and expected %s.' %
+               (optional_message, received, expected))
         super(TooFewArgumentsError, self).__init__(msg, *args)
+
+
+class ClobberError(CondaError):
+
+    def __init__(self, message, path_conflict, **kwargs):
+        self.path_conflict = path_conflict
+        super(ClobberError, self).__init__(message, **kwargs)
+
+    def __repr__(self):
+        clz_name = "ClobberWarning" if self.path_conflict == PathConflict.warn else "ClobberError"
+        return '%s: %s\n' % (clz_name, text_type(self))
+
+
+class BasicClobberError(ClobberError):
+    def __init__(self, source_path, target_path, context):
+        message = dals("""
+        Conda was asked to clobber an existing path.
+          source path:      %(source_path)s
+          destination path: %(target_path)s
+        """)
+        if context.path_conflict == PathConflict.prevent:
+            message += ("Conda no longer clobbers existing paths without the use of the "
+                        "--clobber option\n.")
+        super(BasicClobberError, self).__init__(message, context.path_conflict,
+                                                destination_path=target_path,
+                                                source_path=source_path)
+
+
+class KnownPackageClobberError(ClobberError):
+
+    def __init__(self, target_path, colliding_dist_being_linked, colliding_linked_dist, context):
+        message = dals("""
+        The package '%(colliding_dist_being_linked)s' cannot be installed due to a
+        path collision for '%(target_path)s'.
+        This path already exists in the target prefix, and it won't be removed by
+        an uninstall action in this transaction. The path appears to be coming from
+        the package '%(colliding_linked_dist)s', which is already installed in the prefix.
+        """)
+        if context.path_conflict == PathConflict.prevent:
+            message += ("If you'd like to proceed anyway, re-run the command with "
+                        "the `--clobber` flag.\n.")
+        super(KnownPackageClobberError, self).__init__(
+            message, context.path_conflict,
+            target_path=target_path,
+            colliding_dist_being_linked=colliding_dist_being_linked,
+            colliding_linked_dist=colliding_linked_dist,
+        )
+
+
+class UnknownPackageClobberError(ClobberError):
+
+    def __init__(self, target_path, colliding_dist_being_linked, context):
+        message = dals("""
+        The package '%(colliding_dist_being_linked)s' cannot be installed due to a
+        path collision for '%(target_path)s'.
+        This path already exists in the target prefix, and it won't be removed
+        by an uninstall action in this transaction. The path is one that conda
+        doesn't recognize. It may have been created by another package manager.
+        """)
+        if context.path_conflict == PathConflict.prevent:
+            message += ("If you'd like to proceed anyway, re-run the command with "
+                        "the `--clobber` flag.\n.")
+        super(UnknownPackageClobberError, self).__init__(
+            message, context.path_conflict,
+            target_path=target_path,
+            colliding_dist_being_linked=colliding_dist_being_linked,
+        )
+
+
+class SharedLinkPathClobberError(ClobberError):
+
+    def __init__(self, target_path, incompatible_package_dists, context):
+        message = dals("""
+        This transaction has incompatible packages due to a shared path.
+          packages: %(incompatible_packages)s
+          path: %(target_path)s
+        """)
+        if context.path_conflict == PathConflict.prevent:
+            message += ("If you'd like to proceed anyway, re-run the command with "
+                        "the `--clobber` flag.\n.")
+        super(SharedLinkPathClobberError, self).__init__(
+            message, context.path_conflict,
+            target_path=target_path,
+            incompatible_packages=', '.join(text_type(d) for d in incompatible_package_dists),
+        )
 
 
 class CommandError(CondaError):
@@ -120,8 +222,14 @@ class DryRunExit(CondaExitZero):
 
 class CondaSystemExit(CondaExitZero, SystemExit):
     def __init__(self, *args):
-        msg = ' '.join(text_type(arg) for arg in self.args)
+        msg = ' '.join(text_type(arg) for arg in args)
         super(CondaSystemExit, self).__init__(msg)
+
+
+class CondaHelp(CondaSystemExit):
+    def __init__(self, message, returncode):
+        self.returncode = returncode
+        super(CondaHelp, self).__init__(message)
 
 
 class SubprocessExit(CondaExitZero):
@@ -220,14 +328,18 @@ class PackageNotFoundError(CondaError):
 
 
 class CondaHTTPError(CondaError):
-    def __init__(self, message, url, status_code, reason):
+    def __init__(self, message, url, status_code, reason, elapsed_time):
         message = dals("""
-        HTTP %(status_code)s %(reason)s
-        for url <%(url)s>
+        HTTP %(status_code)s %(reason)s for url <%(url)s>
+        Elapsed: %(elapsed_time)s
 
         """) + message
+        if isinstance(elapsed_time, timedelta):
+            elapsed_time = text_type(elapsed_time).split(':', 1)[-1]
+        if isinstance(reason, string_types):
+            reason = reason.upper()
         super(CondaHTTPError, self).__init__(message, url=url, status_code=status_code,
-                                             reason=reason)
+                                             reason=reason, elapsed_time=elapsed_time)
 
 
 class CondaRevisionError(CondaError):
@@ -364,8 +476,8 @@ class CondaTypeError(CondaError, TypeError):
 
 
 class CondaAssertionError(CondaError, AssertionError):
-    def __init__(self, message):
-        msg = 'Assertion error: %s' % message
+    def __init__(self, message, expected, actual):
+        msg = "Assertion error: %s expected %s and got %s" % (message, expected, actual)
         super(CondaAssertionError, self).__init__(msg)
 
 
@@ -375,10 +487,21 @@ class CondaHistoryError(CondaError):
         super(CondaHistoryError, self).__init__(msg)
 
 
-class CondaSignatureError(CondaError):
+class CondaCorruptEnvironmentError(CondaError):
     def __init__(self, message):
-        msg = 'Signature error: %s' % message
-        super(CondaSignatureError, self).__init__(msg)
+        msg = "Corrupt environment error: %s" % message
+        super(CondaCorruptEnvironmentError, self).__init__(msg)
+
+
+class CondaUpgradeError(CondaError):
+    def __init__(self, message):
+        msg = "Conda upgrade error: %s" % message
+        super(CondaUpgradeError, self).__init__(msg)
+
+
+class CondaVerificationError(CondaError):
+    def __init__(self, message):
+        super(CondaVerificationError, self).__init__(message)
 
 
 def print_conda_exception(exception):
@@ -386,7 +509,6 @@ def print_conda_exception(exception):
 
     stdoutlogger = getLogger('stdout')
     stderrlogger = getLogger('stderr')
-
     if context.json:
         import json
         # stdoutlogger.info('https://anaconda.org/t/fjffjelk3jl4TGEGGjl343/username/package/')
@@ -394,7 +516,8 @@ def print_conda_exception(exception):
         # stdoutlogger.info('https://helloworld.com/t/fjffjelk3jl4TGEGGjl343/username/package/')
         # stdoutlogger.info('http://helloworld.com/t/fjffjelk3jl4TGEGGjl343/username/package/')
         # stdoutlogger.info('http://helloworld.com:8888/t/fjffjelk3jl4TGEGGjl343/username/package/')
-        stdoutlogger.info(json.dumps(exception.dump_map(), indent=2, sort_keys=True))
+        stdoutlogger.info(json.dumps(exception.dump_map(), indent=2, sort_keys=True,
+                                     cls=EntityEncoder))
     else:
         stderrlogger.info("\n\n%r", exception)
 
@@ -447,31 +570,52 @@ conda GitHub issue tracker at:
         stderrlogger.info('\n'.join('    ' + line for line in traceback.splitlines()))
 
 
-def delete_lock(extra_path=None):
-    """
-        Delete lock on exception accoding to pid
-        log warning when delete fails
+# def delete_lock(extra_path=None):
+#     """
+#         Delete lock on exception accoding to pid
+#         log warning when delete fails
+#
+#         Args:
+#             extra_path : The extra path that you want to search and
+#             delete locks
+#     """
+#     from .cli.main_clean import find_lock
+#     from .lock import LOCK_EXTENSION
+#     from .common.disk import rm_rf
+#     file_end = "%s.%s" % (os.getpid(), LOCK_EXTENSION)
+#     locks = list(find_lock(file_ending=file_end, extra_path=extra_path))
+#     failed_delete = []
+#     for path in locks:
+#         try:
+#             rm_rf(path)
+#         except (OSError, IOError) as e:
+#             failed_delete.append(path)
+#             log.warn("%r Cannot unlink %s.", e, path)
+#
+#     if failed_delete:
+#         log.warn("Unable to remove all for this processlocks.\n"
+#                  "Please run `conda clean --lock`.")
 
-        Args:
-            extra_path : The extra path that you want to search and
-            delete locks
-    """
-    from .cli.main_clean import find_lock
-    from .lock import LOCK_EXTENSION
-    from .install import rm_rf
-    file_end = "%s.%s" % (os.getpid(), LOCK_EXTENSION)
-    locks = list(find_lock(file_ending=file_end, extra_path=extra_path))
-    failed_delete = []
-    for path in locks:
-        try:
-            rm_rf(path)
-        except (OSError, IOError) as e:
-            failed_delete.append(path)
-            log.warn("%r Cannot unlink %s.", e, path)
 
-    if failed_delete:
-        log.warn("Unable to remove all for this processlocks.\n"
-                 "Please run `conda clean --lock`.")
+def maybe_raise(error, context):
+    if isinstance(error, CondaMultiError):
+        groups = groupby(lambda e: isinstance(e, ClobberError), error.errors)
+        clobber_errors = groups.get(True, ())
+        non_clobber_errors = groups.get(False, ())
+        if clobber_errors:
+            if context.path_conflict == PathConflict.prevent and not context.clobber:
+                raise error
+            elif context.path_conflict == PathConflict.warn and not context.clobber:
+                print_conda_exception(CondaMultiError(clobber_errors))
+            if non_clobber_errors:
+                raise CondaMultiError(non_clobber_errors)
+    elif isinstance(error, ClobberError):
+        if context.path_conflict == PathConflict.prevent and not context.clobber:
+            raise error
+        elif context.path_conflict == PathConflict.warn and not context.clobber:
+            print_conda_exception(error)
+    else:
+        raise NotImplementedError()
 
 
 def conda_exception_handler(func, *args, **kwargs):
@@ -479,11 +623,14 @@ def conda_exception_handler(func, *args, **kwargs):
         return_value = func(*args, **kwargs)
         if isinstance(return_value, int):
             return return_value
+    except CondaHelp as e:
+        print_conda_exception(e)
+        # delete_lock()
+        return e.returncode
     except CondaExitZero:
         return 0
     except CondaRuntimeError as e:
         print_unexpected_error_message(e)
-        delete_lock()
         return 1
     except CondaError as e:
         from conda.base.context import context
@@ -491,9 +638,7 @@ def conda_exception_handler(func, *args, **kwargs):
             print_unexpected_error_message(e)
         else:
             print_conda_exception(e)
-        delete_lock()
         return 1
     except Exception as e:
         print_unexpected_error_message(e)
-        delete_lock()
         return 1

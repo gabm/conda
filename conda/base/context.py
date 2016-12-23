@@ -1,30 +1,31 @@
 # -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
-import os
-import sys
 from collections import Sequence
 from itertools import chain
 from logging import getLogger
+import os
 from os.path import abspath, basename, dirname, expanduser, isdir, join
 from platform import machine
+import sys
 
-from .constants import DEFAULT_CHANNELS, DEFAULT_CHANNEL_ALIAS, ROOT_ENV_NAME, SEARCH_PATH, conda
-from .._vendor.auxlib.compat import NoneType, string_types
+from conda.base.constants import PathConflict
+from .constants import (APP_NAME, DEFAULT_CHANNELS, DEFAULT_CHANNEL_ALIAS, ROOT_ENV_NAME,
+                        SEARCH_PATH)
 from .._vendor.auxlib.decorators import memoizedproperty
 from .._vendor.auxlib.ish import dals
 from .._vendor.auxlib.path import expand
-from ..common.compat import iteritems, odict
+from ..common.compat import NoneType, iteritems, itervalues, odict, string_types
 from ..common.configuration import (Configuration, LoadError, MapParameter, PrimitiveParameter,
-                                    SequenceParameter)
-from ..common.disk import try_write, conda_bld_ensure_dir
-from ..common.url import has_scheme, path_to_url, split_scheme_auth_token, urlparse
+                                    SequenceParameter, ValidationError)
+from ..common.disk import conda_bld_ensure_dir
+from ..common.url import has_scheme, path_to_url, split_scheme_auth_token
 from ..exceptions import CondaEnvironmentNotFoundError, CondaValueError
 
 try:
-    from cytoolz.itertoolz import concat, concatv
+    from cytoolz.itertoolz import concat, concatv, unique
 except ImportError:
-    from .._vendor.toolz.itertoolz import concat, concatv
+    from .._vendor.toolz.itertoolz import concat, concatv, unique
 
 log = getLogger(__name__)
 
@@ -39,7 +40,12 @@ _platform_map = {
     'darwin': 'osx',
     'win32': 'win',
 }
-non_x86_linux_machines = {'armv6l', 'armv7l', 'ppc64le', 'aarch64'}
+non_x86_linux_machines = {
+    'armv6l',
+    'armv7l',
+    'ppc64le',
+    'aarch64',
+}
 _arch_names = {
     32: 'x86',
     64: 'x86_64',
@@ -57,19 +63,31 @@ class Context(Configuration):
     add_pip_as_python_dependency = PrimitiveParameter(True)
     allow_softlinks = PrimitiveParameter(True)
     auto_update_conda = PrimitiveParameter(True, aliases=('self_update',))
+    clobber = PrimitiveParameter(False)
     changeps1 = PrimitiveParameter(True)
+    concurrent = PrimitiveParameter(False)
     create_default_packages = SequenceParameter(string_types)
     disallow = SequenceParameter(string_types)
     force_32bit = PrimitiveParameter(False)
+    path_conflict = PrimitiveParameter(PathConflict.clobber)
+    repodata_timeout_secs = PrimitiveParameter(300)
+    rollback_enabled = PrimitiveParameter(True)
     track_features = SequenceParameter(string_types)
     use_pip = PrimitiveParameter(True)
-    _root_dir = PrimitiveParameter(sys.prefix, aliases=('root_dir',))
 
-    # connection details
+    _root_dir = PrimitiveParameter("", aliases=('root_dir',))
+    _envs_dirs = SequenceParameter(string_types, aliases=('envs_dirs', 'envs_path'),
+                                   string_delimiter=os.pathsep)
+    _pkgs_dirs = SequenceParameter(string_types, aliases=('pkgs_dirs',))
+
+    # remote connection details
     ssl_verify = PrimitiveParameter(True, parameter_type=string_types + (bool,))
-    client_tls_cert = PrimitiveParameter('', aliases=('client_cert',))
-    client_tls_cert_key = PrimitiveParameter('', aliases=('client_cert_key',))
+    client_ssl_cert = PrimitiveParameter('', aliases=('client_cert',))
+    client_ssl_cert_key = PrimitiveParameter('', aliases=('client_cert_key',))
     proxy_servers = MapParameter(string_types)
+    remote_connect_timeout_secs = PrimitiveParameter(9.15)
+    remote_read_timeout_secs = PrimitiveParameter(60.)
+    remote_max_retries = PrimitiveParameter(3)
 
     add_anaconda_token = PrimitiveParameter(True, aliases=('add_binstar_token',))
     _channel_alias = PrimitiveParameter(DEFAULT_CHANNEL_ALIAS,
@@ -87,10 +105,12 @@ class Context(Configuration):
     _custom_multichannels = MapParameter(Sequence, aliases=('custom_multichannels',))
 
     # command line
+    always_softlink = PrimitiveParameter(False, aliases=('softlink',))
     always_copy = PrimitiveParameter(False, aliases=('copy',))
     always_yes = PrimitiveParameter(False, aliases=('yes',))
     channel_priority = PrimitiveParameter(True)
     debug = PrimitiveParameter(False)
+    force = PrimitiveParameter(False)
     json = PrimitiveParameter(False)
     offline = PrimitiveParameter(False)
     quiet = PrimitiveParameter(False)
@@ -99,15 +119,43 @@ class Context(Configuration):
     update_dependencies = PrimitiveParameter(True, aliases=('update_deps',))
     verbosity = PrimitiveParameter(0, aliases=('verbose',), parameter_type=int)
 
-    _envs_dirs = SequenceParameter(string_types, aliases=('envs_dirs', 'envs_path'),
-                                   string_delimiter=os.pathsep)
-
     # conda_build
     bld_path = PrimitiveParameter('')
     binstar_upload = PrimitiveParameter(None, aliases=('anaconda_upload',),
                                         parameter_type=(bool, NoneType))
     _croot = PrimitiveParameter('', aliases=('croot',))
     conda_build = MapParameter(string_types, aliases=('conda-build',))
+
+    def post_build_validation(self):
+        errors = []
+        if self.client_ssl_cert_key and not self.client_ssl_cert:
+            error = ValidationError('client_ssl_cert', self.client_ssl_cert, "<<merged>>",
+                                    "'client_ssl_cert' is required when 'client_ssl_cert_key' "
+                                    "is defined")
+            errors.append(error)
+        if self.always_copy and self.always_softlink:
+            error = ValidationError('always_copy', self.always_copy, "<<merged>>",
+                                    "'always_copy' and 'always_softlink' are mutually exclusive. "
+                                    "Only one can be set to 'True'.")
+            errors.append(error)
+        return errors
+
+    @memoizedproperty
+    def conda_build_local_paths(self):
+        # does file system reads to make sure paths actually exist
+        return tuple(unique(full_path for full_path in (
+            expand(d) for d in (
+                self._croot,
+                self.bld_path,
+                self.conda_build.get('root-dir'),
+                join(self.root_prefix, 'conda-bld'),
+                '~/conda-bld',
+            ) if d
+        ) if isdir(full_path)))
+
+    @property
+    def conda_build_local_urls(self):
+        return tuple(path_to_url(p) for p in self.conda_build_local_paths)
 
     @property
     def croot(self):
@@ -119,7 +167,7 @@ class Context(Configuration):
         elif 'root-dir' in self.conda_build:
             return abspath(expanduser(self.conda_build['root-dir']))
         elif self.root_writable:
-            return join(self.root_dir, 'conda-bld')
+            return join(self.root_prefix, 'conda-bld')
         else:
             return abspath(expanduser('~/conda-bld'))
 
@@ -193,10 +241,11 @@ class Context(Configuration):
     def root_dir(self):
         # root_dir is an alias for root_prefix, we prefer the name "root_prefix"
         # because it is more consistent with other names
-        return abspath(expanduser(self._root_dir))
+        return self.root_prefix
 
     @property
     def root_writable(self):
+        from ..gateways.disk.test import try_write
         return try_write(self.root_dir)
 
     @property
@@ -209,7 +258,10 @@ class Context(Configuration):
 
     @property
     def pkgs_dirs(self):
-        return [pkgs_dir_from_envs_dir(envs_dir) for envs_dir in self.envs_dirs]
+        if self._pkgs_dirs:
+            return list(self._pkgs_dirs)
+        else:
+            return [pkgs_dir_from_envs_dir(envs_dir) for envs_dir in self.envs_dirs]
 
     @property
     def default_prefix(self):
@@ -248,7 +300,10 @@ class Context(Configuration):
 
     @property
     def root_prefix(self):
-        return abspath(join(sys.prefix, '..', '..')) if conda_in_private_env() else sys.prefix
+        if self._root_dir:
+            return abspath(expanduser(self._root_dir))
+        else:
+            return abspath(join(sys.prefix, '..', '..')) if conda_in_private_env() else sys.prefix
 
     @property
     def conda_prefix(self):
@@ -267,51 +322,66 @@ class Context(Configuration):
                      for location, scheme, auth, token in
                      (split_scheme_auth_token(c) for c in self._migrated_channel_aliases))
 
+    @property
+    def prefix_specified(self):
+        return (self._argparse_args.get("prefix") is not None and
+                self._argparse_args.get("name") is not None)
+
     @memoizedproperty
     def default_channels(self):
         # the format for 'default_channels' is a list of strings that either
         #   - start with a scheme
         #   - are meant to be prepended with channel_alias
-        from ..models.channel import Channel
-        return tuple(Channel.make_simple_channel(self.channel_alias, v)
-                     for v in self._default_channels)
-
-    @memoizedproperty
-    def local_build_root_channel(self):
-        from ..models.channel import Channel
-        url_parts = urlparse(path_to_url(self.local_build_root))
-        location, name = url_parts.path.rsplit('/', 1)
-        if not location:
-            location = '/'
-        return Channel(scheme=url_parts.scheme, location=location, name=name)
+        return self.custom_multichannels['defaults']
 
     @memoizedproperty
     def custom_multichannels(self):
         from ..models.channel import Channel
-        default_custom_multichannels = {
-            'defaults': self.default_channels,
-            'local': (self.local_build_root_channel,),
-        }
-        all_channels = default_custom_multichannels, self._custom_multichannels
-        return odict((name, tuple(Channel(v) for v in c))
-                     for name, c in concat(map(iteritems, all_channels)))
+
+        reserved_multichannel_urls = odict((
+            ('defaults', self._default_channels),
+            ('local', self.conda_build_local_urls),
+        ))
+        reserved_multichannels = odict(
+            (name, tuple(
+                Channel.make_simple_channel(self.channel_alias, url) for url in urls)
+             ) for name, urls in iteritems(reserved_multichannel_urls)
+        )
+        custom_multichannels = odict(
+            (name, tuple(
+                Channel.make_simple_channel(self.channel_alias, url) for url in urls)
+             ) for name, urls in iteritems(self._custom_multichannels)
+        )
+        all_multichannels = odict(
+            (name, channels)
+            for name, channels in concat(map(iteritems, (
+                custom_multichannels,
+                reserved_multichannels,  # reserved comes last, so reserved overrides custom
+            )))
+        )
+        return all_multichannels
 
     @memoizedproperty
     def custom_channels(self):
         from ..models.channel import Channel
         custom_channels = (Channel.make_simple_channel(self.channel_alias, url, name)
                            for name, url in iteritems(self._custom_channels))
-        all_sources = self.default_channels, (self.local_build_root_channel,), custom_channels
-        all_channels = (ch for ch in concat(all_sources))
-        return odict((x.name, x) for x in all_channels)
+        channels_from_multichannels = concat(channel for channel
+                                             in itervalues(self.custom_multichannels))
+        all_channels = odict((x.name, x) for x in (ch for ch in concatv(
+            channels_from_multichannels,
+            custom_channels,
+        )))
+        return all_channels
 
 
 def conda_in_private_env():
-    # conda is located in its own private environment named '_conda'
-    return basename(sys.prefix) == '_conda' and basename(dirname(sys.prefix)) == 'envs'
+    # conda is located in its own private environment named '_conda_'
+    return basename(sys.prefix) == '_conda_' and basename(dirname(sys.prefix)) == 'envs'
+
 
 def reset_context(search_path=SEARCH_PATH, argparse_args=None):
-    context.__init__(search_path, conda, argparse_args)
+    context.__init__(search_path, APP_NAME, argparse_args)
     from ..models.channel import Channel
     Channel._reset_state()
     return context
@@ -332,6 +402,8 @@ def get_help_dict():
         'always_yes': dals("""
             """),
         'always_copy': dals("""
+            """),
+        'always_softlink': dals("""
             """),
         'changeps1': dals("""
             """),
@@ -356,14 +428,14 @@ def get_help_dict():
         'ssl_verify': dals("""
             # ssl_verify can be a boolean value or a filename string
             """),
-        'client_tls_cert': dals("""
-            # client_tls_cert can be a path pointing to a single file
+        'client_ssl_cert': dals("""
+            # client_ssl_cert can be a path pointing to a single file
             # containing the private key and the certificate (e.g. .pem),
-            # or use 'client_tls_cert_key' in conjuction with 'client_tls_cert' for
+            # or use 'client_ssl_cert_key' in conjuction with 'client_ssl_cert' for
             # individual files
             """),
-        'client_tls_cert_key': dals("""
-            # used in conjunction with 'client_tls_cert' for a matching key file
+        'client_ssl_cert_key': dals("""
+            # used in conjunction with 'client_ssl_cert' for a matching key file
             """),
         'track_features': dals("""
             """),
@@ -400,7 +472,7 @@ def get_prefix(ctx, args, search=True):
     Returns: the prefix
     Raises: CondaEnvironmentNotFoundError if the prefix is invalid
     """
-    if args.name:
+    if getattr(args, 'name', None):
         if '/' in args.name:
             raise CondaValueError("'/' not allowed in environment name: %s" %
                                   args.name, getattr(args, 'json', False))
@@ -410,7 +482,7 @@ def get_prefix(ctx, args, search=True):
             return locate_prefix_by_name(ctx, args.name)
         else:
             return join(ctx.envs_dirs[0], args.name)
-    elif args.prefix:
+    elif getattr(args, 'prefix', None):
         return abspath(expanduser(args.prefix))
     else:
         return ctx.default_prefix
@@ -456,7 +528,7 @@ def inroot_notwritable(prefix):
 
 
 try:
-    context = Context(SEARCH_PATH, conda, None)
+    context = Context(SEARCH_PATH, APP_NAME, None)
 except LoadError as e:
     print(e, file=sys.stderr)
     # Exception handler isn't loaded so use sys.exit

@@ -1,24 +1,26 @@
-from __future__ import print_function, division, absolute_import
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import argparse
 import contextlib
+import json
 import os
 import re
 import sys
-from os.path import abspath, basename
+from functools import partial
+from os.path import abspath, basename, join, isfile
 
+from conda import iteritems
+from conda.common.path import is_private_env, prefix_to_env_name
+from conda.install import linked_data
 from .. import console
-from ..base.constants import ROOT_ENV_NAME, NULL
-from ..base.context import context
-from ..exceptions import (DryRunExit, CondaSystemExit, CondaRuntimeError,
-                          CondaValueError, CondaFileIOError)
-from ..install import dist2quad
+from .._vendor.auxlib.entity import EntityEncoder
+from ..base.constants import ROOT_ENV_NAME
+from ..base.context import context, get_prefix as context_get_prefix
+from ..common.constants import NULL
+from ..exceptions import (CondaFileIOError, CondaRuntimeError, CondaSystemExit, CondaValueError,
+                          DryRunExit)
 from ..resolve import MatchSpec
 from ..utils import memoize
-
-# for conda-build 1.21.11 compatibility only
-from conda.base.context import get_prefix as context_get_prefix
-from functools import partial
 get_prefix = partial(context_get_prefix, context)
 
 
@@ -85,7 +87,7 @@ class Packages(Completer):
 
     def _get_items(self):
         # TODO: Include .tar.bz2 files for local installs.
-        from ..api import get_index
+        from conda.core.index import get_index
         args = self.parsed_args
         call_dict = dict(channel_urls=args.channel or (),
                          use_cache=True,
@@ -94,7 +96,7 @@ class Packages(Completer):
         if hasattr(args, 'platform'):  # in search
             call_dict['platform'] = args.platform
         index = get_index(**call_dict)
-        return [dist2quad(i)[0] for i in index]
+        return [record.name for record in index]
 
 class InstalledPackages(Completer):
     def __init__(self, prefix, parsed_args, **kwargs):
@@ -103,9 +105,9 @@ class InstalledPackages(Completer):
 
     @memoize
     def _get_items(self):
-        import conda.install
-        packages = conda.install.linked(context.prefix_w_legacy_search)
-        return [dist2quad(i)[0] for i in packages]
+        from conda.core.linked_data import linked
+        packages = linked(context.prefix_w_legacy_search)
+        return [dist.quad[0] for dist in packages]
 
 def add_parser_help(p):
     """
@@ -167,7 +169,7 @@ def add_parser_json(p):
     p.add_argument(
         "--verbose", "-v",
         action=NullCountAction,
-        help="Use once for info, twice for debug.",
+        help="Use once for info, twice for debug, three times for trace.",
         dest="verbosity",
         default=NULL,
     )
@@ -247,6 +249,7 @@ def add_parser_install(p):
     p.add_argument(
         '-f', "--force",
         action="store_true",
+        default=NULL,
         help="Force install (even when package already installed), "
                "implies --no-deps.",
     )
@@ -289,7 +292,7 @@ def add_parser_install(p):
         action="store_true",
         dest="update_deps",
         default=NULL,
-        help="Don't update dependencies (default: %s)." % context.update_dependencies,
+        help="Update dependencies (default: %s)." % context.update_dependencies,
     )
     p.add_argument(
         "--no-update-dependencies", "--no-update-deps",
@@ -380,6 +383,17 @@ def add_parser_show_channel_urls(p):
         dest="show_channel_urls",
         help="Don't show channel urls.",
     )
+
+
+def add_parser_create_install_update(p):
+    p.add_argument(
+        "--clobber",
+        action="store_true",
+        default=NULL,
+        help="Allow clobbering of overlapping file paths within packages, "
+             "and suppress related warnings.",
+    )
+
 
 def ensure_use_local(args):
     if not args.use_local:
@@ -550,7 +564,7 @@ def disp_features(features):
 def stdout_json(d):
     import json
 
-    json.dump(d, sys.stdout, indent=2, sort_keys=True)
+    json.dump(d, sys.stdout, indent=2, sort_keys=True, cls=EntityEncoder)
     sys.stdout.write('\n')
 
 
@@ -559,7 +573,7 @@ def get_index_trap(*args, **kwargs):
     Retrieves the package index, but traps exceptions and reports them as
     JSON if necessary.
     """
-    from ..api import get_index
+    from conda.core.index import get_index
     kwargs.pop('json', None)
     return get_index(*args, **kwargs)
 
@@ -577,9 +591,6 @@ def stdout_json_success(success=True, **kwargs):
     result = {'success': success}
     result.update(kwargs)
     stdout_json(result)
-
-
-root_no_rm = 'python', 'pycosat', 'pyyaml', 'conda', 'openssl', 'requests'
 
 
 def handle_envs_list(acc, output=True):
@@ -604,3 +615,50 @@ def handle_envs_list(acc, output=True):
 
     if output:
         print()
+
+
+def get_private_envs_json():
+    path_to_private_envs = join(context.root_dir, "conda-meta", "private_envs")
+    if not isfile(path_to_private_envs):
+        return None
+    try:
+        with open(path_to_private_envs, "r") as f:
+            private_envs_json = json.load(f)
+    except json.decoder.JSONDecodeError:
+        private_envs_json = {}
+    return private_envs_json
+
+
+def prefix_if_in_private_env(spec):
+    private_envs_json = get_private_envs_json()
+    if not private_envs_json:
+        return None
+    prefixes = tuple(prefix for pkg, prefix in iteritems(private_envs_json) if
+                     pkg.startswith(spec))
+    prefix = prefixes[0] if len(prefixes) > 0 else None
+    return prefix
+
+
+def pkg_if_in_private_env(spec):
+    private_envs_json = get_private_envs_json()
+    pkgs = tuple(pkg for pkg, prefix in iteritems(private_envs_json) if pkg.startswith(spec))
+    pkg = pkgs[0] if len(pkgs) > 0 else None
+    return pkg
+
+
+def create_prefix_spec_map_with_deps(r, specs, default_prefix):
+    prefix_spec_map = {}
+    for spec in specs:
+        spec_prefix = prefix_if_in_private_env(spec)
+        spec_prefix = spec_prefix if spec_prefix is not None else default_prefix
+        if spec_prefix in prefix_spec_map.keys():
+            prefix_spec_map[spec_prefix].add(spec)
+        else:
+            prefix_spec_map[spec_prefix] = {spec}
+
+        if is_private_env(prefix_to_env_name(spec_prefix, context.root_prefix)):
+            linked = linked_data(spec_prefix)
+            for linked_spec in linked:
+                if not linked_spec.name.startswith(spec) and r.depends_on(spec, linked_spec):
+                    prefix_spec_map[spec_prefix].add(linked_spec.name)
+    return prefix_spec_map

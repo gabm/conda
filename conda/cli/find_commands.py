@@ -1,11 +1,12 @@
-from __future__ import print_function, division, absolute_import
+from __future__ import print_function, division, absolute_import, unicode_literals
 
 import os
 import re
 import sys
 from os.path import isdir, isfile, join, expanduser
 
-from ..utils import memoized, on_win
+from ..common.compat import on_win
+from ..utils import memoized
 
 def find_executable(executable, include_others=True):
     # backwards compatibility

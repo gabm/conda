@@ -1,32 +1,31 @@
 # this module contains miscellaneous stuff which enventually could be moved
 # into other places
 
-from __future__ import print_function, division, absolute_import
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import os
 import re
 import shutil
 import sys
 from collections import defaultdict
-from os.path import (abspath, dirname, expanduser, exists,
-                     isdir, isfile, islink, join, relpath, curdir)
+from os.path import (abspath, dirname, exists, expanduser, isdir, isfile, islink, join,
+                     relpath)
 
-from .api import get_index
+from ._vendor.auxlib.path import expand
 from .base.context import context
-from .common.url import path_to_url, is_url
-from .compat import iteritems, itervalues
-from .models.channel import Channel
-from .exceptions import (CondaFileNotFoundError, ParseError, MD5MismatchError,
-                         PackageNotFoundError, CondaRuntimeError)
-from .install import (name_dist, linked as install_linked, is_fetched, is_extracted, is_linked,
-                      linked_data, find_new_location, cached_url, dist2filename)
-from .instructions import RM_FETCHED, FETCH, RM_EXTRACTED, EXTRACT, UNLINK, LINK, SYMLINK_CONDA
+from .common.compat import iteritems, iterkeys, itervalues, odict, on_win
+from .common.path import url_to_path
+from .common.url import is_url, join_url, path_to_url
+from .core.index import get_index
+from .core.linked_data import is_linked, linked as install_linked, linked_data
+from .exceptions import (CondaRuntimeError, ParseError)
+from .gateways.disk.delete import rm_rf
+from .gateways.disk.read import compute_md5sum
+from .instructions import EXTRACT, FETCH, LINK, RM_EXTRACTED, RM_FETCHED, SYMLINK_CONDA, UNLINK
+from .models.dist import Dist
+from .models.index_record import IndexRecord
 from .plan import execute_actions
-from .resolve import Resolve, MatchSpec
-from .utils import md5_file, on_win
-from .common.disk import rm_rf
-from .install import LINK_COPY, LINK_HARD, LINK_SOFT
-from .install import try_hard_link
+from .resolve import MatchSpec, Resolve
 
 
 def conda_installed_files(prefix, exclude_self_build=False):
@@ -39,7 +38,7 @@ def conda_installed_files(prefix, exclude_self_build=False):
         meta = is_linked(prefix, dist)
         if exclude_self_build and 'file_hash' in meta:
             continue
-        res.update(set(meta['files']))
+        res.update(set(meta.get('files', ())))
     return res
 
 
@@ -50,142 +49,89 @@ def explicit(specs, prefix, verbose=False, force_extract=True, index_args=None, 
     actions = defaultdict(list)
     actions['PREFIX'] = prefix
     actions['op_order'] = RM_FETCHED, FETCH, RM_EXTRACTED, EXTRACT, UNLINK, LINK, SYMLINK_CONDA
-    linked = {name_dist(dist): dist for dist in install_linked(prefix)}
+    linked = {dist.name: dist for dist in install_linked(prefix)}
     index_args = index_args or {}
     index = index or {}
-    verifies = []
-    channels = set()
-    for spec in specs:
-        if spec == '@EXPLICIT':
-            continue
 
-        # Format: (url|path)(:#md5)?
+    # get our index
+    index_args = index_args or {}
+    index.update(get_index(
+        channel_urls=context.channels,
+        prepend=False,
+        platform=context.subdir,
+        use_local=index_args.get('use_local', False),
+        use_cache=index_args.get('use_cache', context.offline),
+        unknown=index_args.get('unknown', False),
+        prefix=index_args.get('prefix', False),
+    ))
+
+    def spec_to_parsed_url(spec):
+        if spec == '@EXPLICIT':
+            return None, None
+
+        if not is_url(spec):
+            spec = path_to_url(expand(spec))
+
+        # parse URL
         m = url_pat.match(spec)
         if m is None:
             raise ParseError('Could not parse explicit URL: %s' % spec)
-        url_p, fn, md5 = m.group('url_p'), m.group('fn'), m.group('md5')
-        if not is_url(url_p):
-            if url_p is None:
-                url_p = curdir
-            elif not isdir(url_p):
-                raise CondaFileNotFoundError(join(url_p, fn))
-            url_p = path_to_url(url_p).rstrip('/')
-        url = "{0}/{1}".format(url_p, fn)
+        url_p, fn, md5sum = m.group('url_p'), m.group('fn'), m.group('md5')
+        # url_p is everything but the tarball_basename and the md5sum
 
-        # is_local: if the tarball is stored locally (file://)
-        # is_cache: if the tarball is sitting in our cache
-        is_local = not is_url(url) or url.startswith('file://')
-        prefix = cached_url(url) if is_local else None
-        is_cache = prefix is not None
-        if is_cache:
-            # Channel information from the cache
-            schannel = 'defaults' if prefix == '' else prefix[:-2]
+        url = join_url(url_p, fn)
+        return url, md5sum
+
+    def url_details_to_dist_record(url, md5sum):
+        dist = Dist(url)
+        if dist in index:
+            record = index[dist]
+            # TODO: we should be able to query across channels for no-channel dist + md5sum matches
+        elif url.startswith('file:/'):
+            md5sum = md5sum or compute_md5sum(url_to_path(url))
+            record = IndexRecord(**{
+                'fn': dist.to_filename(),
+                'url': url,
+                'md5': md5sum,
+                'build': dist.build_string,
+                'build_number': dist.build_number,
+                'name': dist.name,
+                'version': dist.version,
+            })
         else:
-            # Channel information from the URL
-            channel, schannel = Channel(url).url_channel_wtf
-            prefix = '' if schannel == 'defaults' else schannel + '::'
+            # non-local url that's not in index
+            record = IndexRecord(**{
+                'fn': dist.to_filename(),
+                'url': url,
+                'md5': md5sum,
+                'build': dist.build_string,
+                'build_number': dist.build_number,
+                'name': dist.name,
+                'version': dist.version,
+            })
+        return dist, record
 
-        fn = prefix + fn
-        dist = fn[:-8]
-        # Add explicit file to index so we'll be sure to see it later
-        if is_local:
-            index[fn] = {'fn': dist2filename(fn), 'url': url, 'md5': md5}
-            verifies.append((fn, md5))
+    parsed_urls = (spec_to_parsed_url(spec) for spec in specs)
+    link_index = odict(url_details_to_dist_record(url, md5sum)
+                       for url, md5sum in parsed_urls if url)
+    link_dists = tuple(iterkeys(link_index))
 
-        pkg_path = is_fetched(dist)
-        dir_path = is_extracted(dist)
+    # merge new link_index into index
+    for dist, record in iteritems(link_index):
+        _fetched_record = index.get(dist)
+        index[dist] = (IndexRecord.from_objects(record, _fetched_record)
+                       if _fetched_record else record)
 
-        # Don't re-fetch unless there is an MD5 mismatch
-        # Also remove explicit tarballs from cache, unless the path *is* to the cache
-        if pkg_path and not is_cache and (is_local or md5 and md5_file(pkg_path) != md5):
-            # This removes any extracted copies as well
-            actions[RM_FETCHED].append(dist)
-            pkg_path = dir_path = None
+    # unlink any installed packages with same package name
+    unlink_dists = tuple(linked[dist.name] for dist in link_dists if dist.name in linked)
 
-        # Don't re-extract unless forced, or if we can't check the md5
-        if dir_path and (force_extract or md5 and not pkg_path):
-            actions[RM_EXTRACTED].append(dist)
-            dir_path = None
+    for unlink_dist in unlink_dists:
+        actions[UNLINK].append(unlink_dist)
 
-        if not dir_path:
-            if not pkg_path:
-                pkg_path, conflict = find_new_location(dist)
-                pkg_path = join(pkg_path, dist2filename(dist))
-                if conflict:
-                    actions[RM_FETCHED].append(conflict)
-                if not is_local:
-                    if fn not in index or index[fn].get('not_fetched'):
-                        channels.add(schannel)
-                    verifies.append((dist + '.tar.bz2', md5))
-                actions[FETCH].append(dist)
-            actions[EXTRACT].append(dist)
+    for link_dist in link_dists:
+        actions[LINK].append(link_dist)
 
-        # unlink any installed package with that name
-        name = name_dist(dist)
-        if name in linked:
-            actions[UNLINK].append(linked[name])
-
-        ######################################
-        # copied from conda/plan.py   TODO: refactor
-        ######################################
-
-        # check for link action
-        fetched_dist = dir_path or pkg_path[:-8]
-        fetched_dir = dirname(fetched_dist)
-        try:
-            # Determine what kind of linking is necessary
-            if not dir_path:
-                # If not already extracted, create some dummy
-                # data to test with
-                rm_rf(fetched_dist)
-                ppath = join(fetched_dist, 'info')
-                os.makedirs(ppath)
-                index_json = join(ppath, 'index.json')
-                with open(index_json, 'w'):
-                    pass
-            if context.always_copy:
-                lt = LINK_COPY
-            elif try_hard_link(fetched_dir, prefix, dist):
-                lt = LINK_HARD
-            elif context.allow_softlinks and not on_win:
-                lt = LINK_SOFT
-            else:
-                lt = LINK_COPY
-            actions[LINK].append('%s %d' % (dist, lt))
-        except (OSError, IOError):
-            actions[LINK].append('%s %d' % (dist, LINK_COPY))
-        finally:
-            if not dir_path:
-                # Remove the dummy data
-                try:
-                    rm_rf(fetched_dist)
-                except (OSError, IOError):
-                    pass
-
-    ######################################
-    # ^^^^^^^^^^ copied from conda/plan.py
-    ######################################
-
-    # Pull the repodata for channels we are using
-    if channels:
-        index_args = index_args or {}
-        index_args = index_args.copy()
-        index_args['prepend'] = False
-        index_args['channel_urls'] = list(channels)
-        index.update(get_index(**index_args))
-
-    # Finish the MD5 verification
-    for fn, md5 in verifies:
-        info = index.get(fn)
-        if info is None:
-            raise PackageNotFoundError(fn, "no package '%s' in index" % fn)
-        if md5 and 'md5' not in info:
-            sys.stderr.write('Warning: cannot lookup MD5 of: %s' % fn)
-        if md5 and info['md5'] != md5:
-            raise MD5MismatchError('MD5 mismatch for: %s\n   spec: %s\n   repo: %s'
-                                   % (fn, md5, info['md5']))
-
-    execute_actions(actions, index=index, verbose=verbose)
+    execute_actions(actions, index, verbose=verbose)
     return actions
 
 
@@ -286,7 +232,7 @@ def clone_env(prefix1, prefix2, verbose=True, quiet=False, index_args=None):
     """
     untracked_files = untracked(prefix1)
 
-    # Discard conda and any package that depends on it
+    # Discard conda, conda-env and any package that depends on them
     drecs = linked_data(prefix1)
     filter = {}
     found = True
@@ -300,15 +246,20 @@ def clone_env(prefix1, prefix2, verbose=True, quiet=False, index_args=None):
                 filter['conda'] = dist
                 found = True
                 break
+            if name == "conda-env":
+                filter["conda-env"] = dist
+                found = True
+                break
             for dep in info.get('depends', []):
                 if MatchSpec(dep).name in filter:
                     filter[name] = dist
                     found = True
+
     if filter:
         if not quiet:
             print('The following packages cannot be cloned out of the root environment:')
             for pkg in itervalues(filter):
-                print(' - ' + pkg)
+                print(' - ' + pkg.dist_name)
             drecs = {dist: info for dist, info in iteritems(drecs) if info['name'] not in filter}
 
     # Resolve URLs for packages that do not have URLs
@@ -321,13 +272,13 @@ def clone_env(prefix1, prefix2, verbose=True, quiet=False, index_args=None):
         index = get_index(**index_args)
         r = Resolve(index, sort=True)
         for dist in unknowns:
-            name = name_dist(dist)
-            fn = dist2filename(dist)
+            name = dist.dist_name
+            fn = dist.to_filename()
             fkeys = [d for d in r.index.keys() if r.index[d]['fn'] == fn]
             if fkeys:
                 del drecs[dist]
-                dist = sorted(fkeys, key=r.version_key, reverse=True)[0]
-                drecs[dist] = r.index[dist]
+                dist_str = sorted(fkeys, key=r.version_key, reverse=True)[0]
+                drecs[Dist(dist_str)] = r.index[dist_str]
             else:
                 notfound.append(fn)
     if notfound:
@@ -339,16 +290,15 @@ def clone_env(prefix1, prefix2, verbose=True, quiet=False, index_args=None):
     # Assemble the URL and channel list
     urls = {}
     for dist, info in iteritems(drecs):
-        fkey = dist + '.tar.bz2'
+        fkey = dist
         if fkey not in index:
-            info['not_fetched'] = True
-            index[fkey] = info
+            index[fkey] = IndexRecord.from_objects(info, not_fetched=True)
             r = None
         urls[dist] = info['url']
 
     if r is None:
         r = Resolve(index)
-    dists = r.dependency_sort(urls.keys())
+    dists = r.dependency_sort({d.quad[0]: d for d in urls.keys()})
     urls = [urls[d] for d in dists]
 
     if verbose:

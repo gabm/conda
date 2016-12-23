@@ -4,13 +4,13 @@
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
 
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 from .common import add_parser_install, add_parser_json
 from .install import install
-from ..base.constants import NULL
-from ..common.disk import delete_trash
-from ..utils import on_win
+from ..common.compat import on_win
+from ..common.constants import NULL
+from ..gateways.disk.delete import delete_trash
 
 help = "Create a new conda environment from a list of specified packages. "
 descr = (help +

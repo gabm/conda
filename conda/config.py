@@ -3,7 +3,7 @@
 #
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
-from __future__ import print_function, division, absolute_import
+from __future__ import print_function, division, absolute_import, unicode_literals
 
 import os
 import sys
@@ -38,6 +38,7 @@ rc_bool_keys = [
     'always_yes',
     'always_copy',
     'allow_softlinks',
+    'always_softlink',
     'auto_update_conda',
     'changeps1',
     'use_pip',
@@ -54,8 +55,8 @@ rc_bool_keys = [
 rc_string_keys = [
     'ssl_verify',
     'channel_alias',
-    'client_tls_cert',
-    'client_tls_cert_key',
+    'client_ssl_cert',
+    'client_ssl_cert_key',
 ]
 
 # Not supported by conda config yet

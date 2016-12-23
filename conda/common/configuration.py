@@ -17,14 +17,25 @@ Limitations:
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 from abc import ABCMeta, abstractmethod
-from collections import Mapping, Set, defaultdict
-from enum import Enum
+from collections import Mapping, defaultdict
 from glob import glob
 from itertools import chain
 from logging import getLogger
 from os import environ, stat
-from os.path import join, basename
+from os.path import basename, join
 from stat import S_IFDIR, S_IFMT, S_IFREG
+
+from enum import Enum
+
+from .compat import (isiterable, iteritems, itervalues, odict, primitive_types, string_types,
+                     text_type, with_metaclass)
+from .constants import EMPTY_MAP, NULL
+from .yaml import yaml_load
+from .. import CondaError, CondaMultiError
+from .._vendor.auxlib.collection import AttrDict, first, frozendict, last, make_immutable
+from .._vendor.auxlib.exceptions import ThisShouldNeverHappenError
+from .._vendor.auxlib.path import expand
+from .._vendor.auxlib.type_coercion import TypeCoercionError, typify_data_structure
 
 try:
     from cytoolz.dicttoolz import merge
@@ -40,19 +51,6 @@ try:
 except ImportError:  # pragma: no cover
     from ruamel.yaml.comments import CommentedSeq, CommentedMap  # pragma: no cover
     from ruamel.yaml.scanner import ScannerError
-
-from .. import CondaError, CondaMultiError
-from .._vendor.auxlib.collection import first, frozendict, last, AttrDict
-from .._vendor.auxlib.exceptions import ThisShouldNeverHappenError
-from .._vendor.auxlib.path import expand
-from .._vendor.auxlib.type_coercion import typify_data_structure, TypeCoercionError
-from ..base.constants import EMPTY_MAP, NULL
-from .compat import (isiterable, iteritems, odict, primitive_types, text_type,
-                     with_metaclass, string_types, itervalues)
-from .yaml import yaml_load
-
-__all__ = ["Configuration", "PrimitiveParameter",
-           "SequenceParameter", "MapParameter"]
 
 log = getLogger(__name__)
 
@@ -87,10 +85,6 @@ class ValidationError(ConfigurationError):
         self.parameter_value = parameter_value
         self.source = source
         super(ConfigurationError, self).__init__(msg, **kwargs)
-
-        def __str__(self):
-            return ("Parameter %s = %r declared in %s is invalid."
-                    % (self.parameter_name, self.parameter_value, self.source))
 
 
 class MultipleKeysError(ValidationError):
@@ -172,19 +166,6 @@ class ParameterFlag(Enum):
             return cls.from_value(string)
         except (ValueError, AttributeError):
             return None
-
-
-# TODO: move elsewhere, probably auxlib
-# TODO: need to add order to at least frozendict, and preferrably frozenset
-def make_immutable(value):
-    if isinstance(value, Mapping):
-        return frozendict(value)
-    elif isinstance(value, Set):
-        return frozenset(value)
-    elif isiterable(value):
-        return tuple(value)
-    else:
-        return value
 
 
 @with_metaclass(ABCMeta)
@@ -705,34 +686,81 @@ class Configuration(object):
     def __init__(self, search_path=(), app_name=None, argparse_args=None):
         self.raw_data = odict()
         self._cache_ = dict()
+        self._reset_callbacks = set()  # TODO: make this a boltons ordered set
         self._validation_errors = defaultdict(list)
-        if search_path:
-            self._add_search_path(search_path)
-        if app_name is not None:
-            self._add_env_vars(app_name)
-        if argparse_args is not None:
-            self._add_argparse_args(argparse_args)
 
-    def _add_search_path(self, search_path):
-        return self._add_raw_data(load_file_configs(search_path))
+        if not hasattr(self, '_app_name') and app_name is not None:
+            # we only set app_name once; we never change it
+            self._app_name = app_name
 
-    def _add_env_vars(self, app_name):
-        self.raw_data[EnvRawParameter.source] = EnvRawParameter.make_raw_parameters(app_name)
-        self._cache_ = dict()
+        self._set_search_path(search_path)
+        self._set_env_vars(app_name)
+        self._set_argparse_args(argparse_args)
+
+    def _set_search_path(self, search_path):
+        self._search_path = search_path
+
+        # we need to make sure old data doesn't stick around if we are resetting
+        #   easiest solution is to completely clear raw_data and re-load other sources
+        #   if raw_data holds contents
+        raw_data_held_contents = bool(self.raw_data)
+        if raw_data_held_contents:
+            self.raw_data = odict()
+
+        self._set_raw_data(load_file_configs(search_path))
+
+        if raw_data_held_contents:
+            # this should only be triggered on re-initialization / reset
+            self._set_env_vars(getattr(self, '_app_name', None))
+            self._set_argparse_args(self._argparse_args)
+
         return self
 
-    def _add_argparse_args(self, argparse_args):
-        self._argparse_args = AttrDict((k, v) for k, v, in iteritems(vars(argparse_args))
-                                       if v is not NULL)
+    def _set_env_vars(self, app_name=None):
+        if not hasattr(self, '_app_name') and app_name is not None:
+            # we only set app_name once; we never change it
+            self._app_name = app_name
+        if getattr(self, '_app_name', None):
+            erp = EnvRawParameter
+            self.raw_data[erp.source] = erp.make_raw_parameters(self._app_name)
+        self._reset_cache()
+        return self
+
+    def _set_argparse_args(self, argparse_args):
+        # the argparse_args we store internally in this class as self._argparse_args
+        #   will be a mapping type, not a non-`dict` object like argparse_args is natively
+        if hasattr(argparse_args, '__dict__'):
+            # the argparse_args from argparse will be an object with a __dict__ attribute
+            #   and not a mapping type like this method will turn it into
+            self._argparse_args = AttrDict((k, v) for k, v, in iteritems(vars(argparse_args))
+                                           if v is not NULL)
+        elif not argparse_args:
+            # argparse_args can be initialized as `None`
+            self._argparse_args = AttrDict()
+        else:
+            # we're calling this method with argparse_args that are a mapping type, likely
+            #   already having been processed by this method before
+            self._argparse_args = AttrDict((k, v) for k, v, in iteritems(argparse_args)
+                                           if v is not NULL)
+
         source = ArgParseRawParameter.source
         self.raw_data[source] = ArgParseRawParameter.make_raw_parameters(self._argparse_args)
-        self._cache_ = dict()
+        self._reset_cache()
         return self
 
-    def _add_raw_data(self, raw_data):
+    def _set_raw_data(self, raw_data):
         self.raw_data.update(raw_data)
-        self._cache_ = dict()
+        self._reset_cache()
         return self
+
+    def _reset_cache(self):
+        self._cache_ = dict()
+        for callback in self._reset_callbacks:
+            callback()
+        return self
+
+    def register_reset_callaback(self, callback):
+        self._reset_callbacks.add(callback)
 
     def check_source(self, source):
         # this method ends up duplicating much of the logic of Parameter.__get__
@@ -769,6 +797,24 @@ class Configuration(object):
         validation_errors = list(chain.from_iterable(self.check_source(source)[1]
                                                      for source in self.raw_data))
         raise_errors(validation_errors)
+        self.validate_configuration()
+
+    @staticmethod
+    def _collect_validation_error(func, *args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        except ConfigurationError as e:
+            return e.errors if hasattr(e, 'errors') else e,
+        return ()
+
+    def validate_configuration(self):
+        errors = chain.from_iterable(Configuration._collect_validation_error(getattr, self, name)
+                                     for name in self.parameter_names)
+        post_errors = self.post_build_validation()
+        raise_errors(tuple(chain.from_iterable((errors, post_errors))))
+
+    def post_build_validation(self):
+        return ()
 
     def collect_all(self):
         typed_values = odict()

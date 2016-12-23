@@ -4,14 +4,14 @@
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
 """OS-agnostic, system-level binary package manager."""
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import os
+from os.path import dirname
 import sys
 
 from ._vendor.auxlib.packaging import get_version
-from .compat import text_type, iteritems
-from .gateways.logging import initialize_logging
+from .common.compat import iteritems, text_type
 
 __all__ = [
     "__name__", "__version__", "__author__",
@@ -29,8 +29,7 @@ __url__ = "https://github.com/conda/conda"
 
 if os.getenv('CONDA_ROOT') is None:
     os.environ['CONDA_ROOT'] = sys.prefix
-
-initialize_logging()
+CONDA_PACKAGE_ROOT = dirname(__file__)
 
 
 class CondaError(Exception):

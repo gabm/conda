@@ -4,23 +4,21 @@
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
 
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
+from collections import OrderedDict
 import json
 import os
-import re
-import sys
-from collections import OrderedDict
-from conda.common.url import mask_anaconda_token
 from os import listdir
 from os.path import exists, expanduser, join
+import re
+import sys
 
-from .common import (add_parser_json, add_parser_offline, arg2spec, disp_features,
-                     handle_envs_list, stdout_json)
-from ..compat import itervalues
+from .common import add_parser_json, add_parser_offline, arg2spec, handle_envs_list, stdout_json
+from ..common.compat import itervalues, on_win
+from ..common.url import mask_anaconda_token
 from ..config import rc_path, sys_rc_path, user_rc_path
 from ..models.channel import prioritize_channels
-from ..utils import on_win
 
 help = "Display information about current conda install."
 
@@ -77,24 +75,6 @@ def configure_parser(sub_parsers):
         help='Display list of channels with tokens exposed.',
     )
     p.set_defaults(func=execute)
-
-
-def show_pkg_info(name):
-    from conda.api import get_index
-    from conda.resolve import Resolve
-
-    index = get_index()
-    r = Resolve(index)
-    print(name)
-    if name in r.groups:
-        for pkg in sorted(r.get_pkgs(name)):
-            print('    %-15s %15s  %s' % (
-                    pkg.version,
-                    pkg.build,
-                    disp_features(r.features(pkg.fn))))
-    else:
-        print('    not available')
-    # TODO
 
 
 python_re = re.compile('python\d\.\d')
@@ -154,6 +134,7 @@ def execute(args, parser):
     from conda.models.channel import offline_keep
     from conda.resolve import Resolve
     from conda.api import get_index
+    from conda.connection import user_agent
 
     if args.root:
         if context.json:
@@ -249,7 +230,11 @@ def execute(args, parser):
         envs=[],
         python_version='.'.join(map(str, sys.version_info)),
         requests_version=requests_version,
+        user_agent=user_agent,
     )
+    if not on_win:
+        info_dict['UID'] = os.geteuid()
+        info_dict['GID'] = os.getegid()
 
     if args.all or context.json:
         for option in options:
@@ -277,7 +262,15 @@ Current conda install:
            channel URLs : %(_channels)s
             config file : %(rc_path)s
            offline mode : %(offline)s
+             user-agent : %(user_agent)s\
 """ % info_dict)
+
+        if not on_win:
+            print("""\
+                UID:GID : %(UID)s:%(GID)s
+""" % info_dict)
+        else:
+            print()
 
     if args.envs:
         handle_envs_list(info_dict['envs'], not context.json)

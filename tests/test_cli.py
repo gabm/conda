@@ -6,7 +6,7 @@ import pytest
 
 from conda.cli.common import arg2spec, spec_from_line
 from conda.common.io import captured
-from conda.compat import text_type
+from conda.common.compat import text_type
 from conda.exceptions import CondaValueError
 
 from tests.helpers import capture_json_with_argv, assert_in, run_inprocess_conda_command
@@ -220,7 +220,7 @@ class TestJson(unittest.TestCase):
         assert rc > 0
 
     @pytest.mark.timeout(300)
-    def test_search(self):
+    def test_search_0(self):
         with captured():
             res = capture_json_with_argv('conda search --json')
         self.assertIsInstance(res, dict)

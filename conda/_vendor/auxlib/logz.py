@@ -5,6 +5,8 @@ from logging import getLogger, INFO, Handler, Formatter, StreamHandler, DEBUG
 from pprint import pformat
 from sys import stderr
 
+from .compat import text_type
+
 log = getLogger(__name__)
 root_log = getLogger()
 
@@ -99,7 +101,7 @@ def stringify(obj):
             builder.append(body)
 
     def requests_models_PreparedRequest_builder(builder, request_object):
-        builder.append("> {0} {1} {2}".format(request_object.method, request_object.path_url,
+        builder.append(">>{0} {1} {2}".format(request_object.method, request_object.path_url,
                                               request_object.url.split(':', 1)[0].upper()))
         builder.extend("> {0}: {1}".format(key, value)
                        for key, value in sorted(request_object.headers.items(),
@@ -108,19 +110,22 @@ def stringify(obj):
         if request_object.body:
             builder.append(request_object.body)
 
-    def requests_models_Response_builder(builder, response_object):
-        builder.append("< {0} {1} {2}".format(response_object.url.split(':', 1)[0].upper(),
+    def requests_models_Response_builder(builder, response_object, include_content=False):
+        builder.append("<<{0} {1} {2}".format(response_object.url.split(':', 1)[0].upper(),
                                               response_object.status_code, response_object.reason))
-        builder.extend("> {0}: {1}".format(key, value)
+        builder.extend("< {0}: {1}".format(key, value)
                        for key, value in sorted(response_object.headers.items(),
                                                 key=response_header_sort_key))
-        builder.append('')
-        content_type = response_object.headers.get('Content-Type')
-        if content_type == 'application/json':
-            builder.append(pformat(response_object.json, indent=2))
+        elapsed = text_type(response_object.elapsed).split(':', 1)[-1]
+        builder.append('< Elapsed: {0}'.format(elapsed))
+        if include_content:
             builder.append('')
-        elif content_type is not None and content_type.startswith('text/'):
-            builder.append(response_object.text)
+            content_type = response_object.headers.get('Content-Type')
+            if content_type == 'application/json':
+                builder.append(pformat(response_object.json(), indent=2))
+                builder.append('')
+            elif content_type is not None and content_type.startswith('text/'):
+                builder.append(response_object.text)
 
     try:
         name = fullname(obj)
@@ -130,7 +135,10 @@ def stringify(obj):
         elif name.endswith('requests.models.PreparedRequest'):
             requests_models_PreparedRequest_builder(builder, obj)
         elif name.endswith('requests.models.Response'):
-            requests_models_PreparedRequest_builder(builder, obj.request)
+            if getattr(obj, 'request'):
+                requests_models_PreparedRequest_builder(builder, obj.request)
+            else:
+                log.info("request is 'None' for Response object with url %s", obj.url)
             requests_models_Response_builder(builder, obj)
         else:
             return None

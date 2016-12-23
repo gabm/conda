@@ -7,7 +7,7 @@
 # NOTE:
 #     This module is deprecated.  Don't import from this here when writing
 #     new code.
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import hashlib
 import json
@@ -16,13 +16,16 @@ import re
 import shutil
 import tarfile
 import tempfile
+from conda._vendor.auxlib.entity import EntityEncoder
+from conda.core.linked_data import is_linked, linked_data
+from conda.core.linked_data import linked
 from os.path import basename, dirname, isfile, islink, join, abspath, isdir
 
 from ..base.context import context, get_prefix
 
 from .common import add_parser_prefix
 from ..common.compat import PY3, itervalues
-from ..install import is_linked, linked, linked_data, PREFIX_PLACEHOLDER
+from ..install import PREFIX_PLACEHOLDER
 from ..misc import untracked
 
 
@@ -170,7 +173,7 @@ def _add_info_dir(t, tmp_dir, files, has_prefix, info):
             fo.write(f + '\n')
 
     with open(join(info_dir, 'index.json'), 'w') as fo:
-        json.dump(info, fo, indent=2, sort_keys=True)
+        json.dump(info, fo, indent=2, sort_keys=True, cls=EntityEncoder)
 
     if has_prefix:
         with open(join(info_dir, 'has_prefix'), 'w') as fo:

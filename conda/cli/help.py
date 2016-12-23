@@ -1,10 +1,11 @@
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 from os.path import join
 
 from .common import name_prefix
 from ..base.context import context
 from ..exceptions import CondaIOError
+
 
 def read_message(fn):
     res = []

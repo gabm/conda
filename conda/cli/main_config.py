@@ -3,21 +3,23 @@
 #
 # conda is distributed under the terms of the BSD 3-clause license.
 # Consult LICENSE.txt or http://opensource.org/licenses/BSD-3-Clause.
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import collections
 import json
 import os
 import sys
 
-from .common import (Completer, add_parser_json, stdout_json_success)
+from .common import Completer, add_parser_json, stdout_json_success
 from .. import CondaError
 from .._vendor.auxlib.compat import isiterable
+from .._vendor.auxlib.entity import EntityEncoder
 from .._vendor.auxlib.type_coercion import boolify
 from ..base.context import context
+from ..common.compat import iteritems, string_types
 from ..common.configuration import pretty_list, pretty_map
+from ..common.constants import NULL
 from ..common.yaml import yaml_dump, yaml_load
-from ..compat import iteritems, string_types
 from ..config import (rc_bool_keys, rc_list_keys, rc_other, rc_string_keys, sys_rc_path,
                       user_rc_path)
 from ..exceptions import CondaKeyError, CondaValueError, CouldntParseError
@@ -218,6 +220,7 @@ or the file path given by the 'CONDARC' environment variable, if it is set
     p.add_argument(
         "-f", "--force",
         action="store_true",
+        default=NULL,
         help="""Write to the config file using the yaml parser.  This will
         remove any comments or structure from the file."""
     )
@@ -276,6 +279,7 @@ def execute_config(args, parser):
                                            'add_pip_as_python_dependency',
                                            'allow_softlinks',
                                            'always_copy',
+                                           'always_softlink',
                                            'always_yes',
                                            'auto_update_conda',
                                            'binstar_upload',
@@ -283,8 +287,8 @@ def execute_config(args, parser):
                                            'channel_alias',
                                            'channel_priority',
                                            'channels',
-                                           'client_tls_cert',
-                                           'client_tls_cert_key',
+                                           'client_ssl_cert',
+                                           'client_ssl_cert_key',
                                            'create_default_packages',
                                            'debug',
                                            'default_channels',
@@ -303,9 +307,11 @@ def execute_config(args, parser):
                                            'verbosity',
                                            )))
         if context.json:
-            print(json.dumps(d, sort_keys=True, indent=2, separators=(',', ': ')))
+            print(json.dumps(d, sort_keys=True, indent=2, separators=(',', ': '),
+                  cls=EntityEncoder))
         else:
             print('\n'.join(format_dict(d)))
+        context.validate_configuration()
         return
 
     if args.validate:

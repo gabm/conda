@@ -1,6 +1,6 @@
 import pytest
-from os.path import basename, join, exists, isfile
-from conda.lock import FileLock, LockError, DirectoryLock
+from conda.lock import DirectoryLock, FileLock, LockError
+from os.path import basename, exists, isfile, join
 
 
 def test_filelock_passes(tmpdir):
@@ -118,7 +118,7 @@ def test_permission_file():
         Make sure no exception raised
     """
     import tempfile
-    from conda.compat import text_type
+    from conda.common.compat import text_type
     with tempfile.NamedTemporaryFile(mode='r') as f:
         if not isinstance(f.name, text_type):
             return
@@ -126,17 +126,3 @@ def test_permission_file():
 
             path = basename(lock.lock_file_path)
             assert not exists(join(f.name, path))
-
-
-def test_delete_lock():
-    from .test_create import make_temp_env
-    from conda.exceptions import delete_lock
-    with make_temp_env() as prefix:
-        try:
-            with DirectoryLock(prefix) as lock:
-                path = basename(lock.lock_file_path)
-                assert isfile(join(prefix, path))
-                raise TypeError
-        except TypeError:
-            delete_lock(extra_path=prefix)
-            assert not exists(join(prefix, path))
