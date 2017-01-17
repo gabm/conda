@@ -37,7 +37,8 @@ from conda.cli.main_remove import configure_parser as remove_configure_parser
 from conda.cli.main_search import configure_parser as search_configure_parser
 from conda.cli.main_update import configure_parser as update_configure_parser
 from conda.common.compat import itervalues, text_type
-from conda.common.io import captured, disable_logger, replace_log_streams, stderr_log_level
+from conda.common.io import captured, disable_logger, replace_log_streams, stderr_log_level, \
+    env_var
 from conda.common.path import get_bin_directory_short_path, get_python_site_packages_short_path, pyc_path
 from conda.common.url import path_to_url
 from conda.common.yaml import yaml_load
@@ -183,6 +184,9 @@ def get_conda_list_tuple(prefix, package_name):
 
 class IntegrationTests(TestCase):
 
+    def setUp(self):
+        PackageCache.clear()
+
     def test_install_python2(self):
         with make_temp_env("python=2") as prefix:
             assert exists(join(prefix, PYTHON_BINARY))
@@ -190,7 +194,7 @@ class IntegrationTests(TestCase):
 
     @pytest.mark.timeout(900)
     def test_create_install_update_remove(self):
-        with make_temp_env("python=3") as prefix:
+        with make_temp_env("python=3.5") as prefix:
             assert exists(join(prefix, PYTHON_BINARY))
             assert_package_is_installed(prefix, 'python-3')
 
@@ -265,7 +269,7 @@ class IntegrationTests(TestCase):
 
     @pytest.mark.timeout(300)
     def test_list_with_pip_egg(self):
-        with make_temp_env("python=3 pip") as prefix:
+        with make_temp_env("python=3.5 pip") as prefix:
             check_call(PYTHON_BINARY + " -m pip install --egg --no-binary flask flask==0.10.1",
                        cwd=prefix, shell=True)
             stdout, stderr = run_command(Commands.LIST, prefix)
@@ -275,7 +279,7 @@ class IntegrationTests(TestCase):
 
     @pytest.mark.timeout(300)
     def test_list_with_pip_wheel(self):
-        with make_temp_env("python=3 pip") as prefix:
+        with make_temp_env("python=3.5 pip") as prefix:
             check_call(PYTHON_BINARY + " -m pip install flask==0.10.1",
                        cwd=prefix, shell=True)
             stdout, stderr = run_command(Commands.LIST, prefix)
@@ -289,7 +293,7 @@ class IntegrationTests(TestCase):
 
     @pytest.mark.timeout(300)
     def test_install_tarball_from_local_channel(self):
-        with make_temp_env("python flask=0.10.1") as prefix:
+        with make_temp_env("flask=0.10.1") as prefix:
             assert_package_is_installed(prefix, 'flask-0.10.1')
             flask_data = [p for p in itervalues(linked_data(prefix)) if p['name'] == 'flask'][0]
             run_command(Commands.REMOVE, prefix, 'flask')
@@ -307,12 +311,17 @@ class IntegrationTests(TestCase):
             repodata = {'info': {}, 'packages': {flask_fname: IndexRecord(**flask_data)}}
             with make_temp_env() as channel:
                 subchan = join(channel, context.subdir)
+                noarch_dir = join(channel, 'noarch')
                 channel = path_to_url(channel)
                 os.makedirs(subchan)
+                os.makedirs(noarch_dir)
                 tar_new_path = join(subchan, flask_fname)
                 copyfile(tar_old_path, tar_new_path)
                 with bz2.BZ2File(join(subchan, 'repodata.json.bz2'), 'w') as f:
                     f.write(json.dumps(repodata, cls=EntityEncoder).encode('utf-8'))
+                with bz2.BZ2File(join(noarch_dir, 'repodata.json.bz2'), 'w') as f:
+                    f.write(json.dumps({}, cls=EntityEncoder).encode('utf-8'))
+
                 run_command(Commands.INSTALL, prefix, '-c', channel, 'flask', '--json')
                 assert_package_is_installed(prefix, channel + '::' + 'flask-')
 
@@ -388,6 +397,20 @@ class IntegrationTests(TestCase):
 
             run_command(Commands.REMOVE, prefix, '--all')
             assert not exists(prefix)
+
+    @pytest.mark.skipif(on_win, reason="nomkl not present on windows")
+    @pytest.mark.timeout(300)
+    def test_remove_features(self):
+        with make_temp_env("numpy nomkl") as prefix:
+            assert exists(join(prefix, PYTHON_BINARY))
+            assert_package_is_installed(prefix, 'numpy')
+            assert_package_is_installed(prefix, 'nomkl')
+            assert not package_is_installed(prefix, 'mkl')
+
+            run_command(Commands.REMOVE, prefix, '--features', 'nomkl')
+            assert_package_is_installed(prefix, 'numpy')
+            assert not package_is_installed(prefix, 'nomkl')
+            assert_package_is_installed(prefix, 'mkl')
 
     @pytest.mark.skipif(on_win and context.bits == 32, reason="no 32-bit windows python on conda-forge")
     def test_dash_c_usage_replacing_python(self):
@@ -465,7 +488,7 @@ class IntegrationTests(TestCase):
     @pytest.mark.skipif(on_win, reason="r packages aren't prime-time on windows just yet")
     @pytest.mark.timeout(600)
     def test_clone_offline_multichannel_with_untracked(self):
-        with make_temp_env("python") as prefix:
+        with make_temp_env("python=3.5") as prefix:
 
             run_command(Commands.CONFIG, prefix, "--add channels https://repo.continuum.io/pkgs/free")
             run_command(Commands.CONFIG, prefix, "--remove channels defaults")
@@ -502,6 +525,34 @@ class IntegrationTests(TestCase):
                 assert_package_is_installed(clone_prefix, 'python')
                 assert_package_is_installed(clone_prefix, 'rpy2')
                 assert isfile(join(clone_prefix, 'condarc'))  # untracked file
+
+    def test_update_all(self):
+        with make_temp_env("numpy=1.10 pandas=0.17") as prefix:
+            assert package_is_installed(prefix, "numpy-1.10")
+            assert package_is_installed(prefix, "pandas-0.17")
+
+            run_command(Commands.UPDATE, prefix, "--all")
+            assert not package_is_installed(prefix, "numpy-1.10")
+            assert package_is_installed(prefix, "numpy")
+            assert not package_is_installed(prefix, "pandas-0.17")
+            assert package_is_installed(prefix, "pandas")
+
+    def test_package_pinning(self):
+        with make_temp_env("numpy=1.10.4 pandas=0.17") as prefix:
+            assert package_is_installed(prefix, "numpy-1.10.4")
+            assert package_is_installed(prefix, "pandas-0.17")
+
+            with open(join(prefix, 'conda-meta', 'pinned'), 'w') as fh:
+                fh.write("numpy 1.10.4\n")
+
+            run_command(Commands.UPDATE, prefix, "--all")
+            assert package_is_installed(prefix, "numpy-1.10.4")
+            assert not package_is_installed(prefix, "pandas-0.17")
+            assert package_is_installed(prefix, "pandas")
+
+            run_command(Commands.UPDATE, prefix, "--all --no-pin")
+            assert not package_is_installed(prefix, "numpy-1.10.4")
+            assert package_is_installed(prefix, "numpy")
 
     # @pytest.mark.skipif(not on_win, reason="shortcuts only relevant on Windows")
     # def test_shortcut_in_underscore_env_shows_message(self):
@@ -886,7 +937,7 @@ class IntegrationTests(TestCase):
                 assert not package_is_installed(prefix, 'openssl')
 
     def test_transactional_rollback_upgrade_downgrade(self):
-        with make_temp_env("python=3") as prefix:
+        with make_temp_env("python=3.5") as prefix:
             assert exists(join(prefix, PYTHON_BINARY))
             assert_package_is_installed(prefix, 'python-3')
 
@@ -911,3 +962,11 @@ class IntegrationTests(TestCase):
     def test_conda_info_python(self):
         stdout, stderr = run_command(Commands.INFO, None, "python=3.5")
         assert "python 3.5.1 0" in stdout
+
+    def test_toolz_cytoolz_package_cache_regression(self):
+        with make_temp_env("python=3.5") as prefix:
+            pkgs_dir = join(prefix, 'pkgs')
+            with env_var('CONDA_PKGS_DIRS', pkgs_dir, reset_context):
+                assert context.pkgs_dirs == [pkgs_dir]
+                run_command(Commands.INSTALL, prefix, "-c conda-forge toolz cytoolz")
+                assert_package_is_installed(prefix, 'toolz-')

@@ -27,8 +27,10 @@ __license__ = "BSD"
 __summary__ = __doc__
 __url__ = "https://github.com/conda/conda"
 
+
 if os.getenv('CONDA_ROOT') is None:
     os.environ['CONDA_ROOT'] = sys.prefix
+
 CONDA_PACKAGE_ROOT = dirname(__file__)
 
 

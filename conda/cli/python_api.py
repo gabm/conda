@@ -39,12 +39,12 @@ def run_command(command, *arguments, **kwargs):
 
     Args:
         command: one of the Commands.X
-        *arguments: instructions you would normally pass to the conda comamnd on the command line
+        *arguments: instructions you would normally pass to the conda command on the command line
                     see below for examples
         **kwargs: special instructions for programmatic overrides
           use_exception_handler: defaults to False.  False will let the code calling
               `run_command` handle all exceptions.  True won't raise when an exception
-              has occured, and instead give a non-zero return code
+              has occurred, and instead give a non-zero return code
           search_path: an optional non-standard search path for configuration information
               that overrides the default SEARCH_PATH
 
@@ -73,10 +73,15 @@ def run_command(command, *arguments, **kwargs):
         argparse_args=args,
     )
     log.debug("executing command >>>  conda %s", command_line)
-    with captured() as c, replace_log_streams():
-        if use_exception_handler:
-            return_code = conda_exception_handler(args.func, args, p)
-        else:
-            return_code = args.func(args, p)
+    try:
+        with captured() as c, replace_log_streams():
+            if use_exception_handler:
+                return_code = conda_exception_handler(args.func, args, p)
+            else:
+                return_code = args.func(args, p)
+    except Exception as e:
+        log.debug("\n  stdout: %s\n  stderr: %s", c.stdout, c.stderr)
+        e.stdout, e.stderr = c.stdout, c.stderr
+        raise e
     log.debug("\n  stdout: %s\n  stderr: %s\n  return_code: %s", c.stdout, c.stderr, return_code)
     return c.stdout, c.stderr, return_code

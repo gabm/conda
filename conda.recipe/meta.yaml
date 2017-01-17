@@ -39,12 +39,13 @@ requirements:
     - python
   run:
     - python
-#    - conda-env >=2.6
+    - conda-env >=2.6
     - enum34               [py<34]
     - menuinst             [win]
     - pycosat >=0.6.1
-    - requests >=2.5.3
-    - ruamel_yaml >=0.11.7
+    - pyopenssl >=16.2.0
+    - requests >=2.12.4
+    - ruamel_yaml >=0.11.14
 
 test:
   imports:

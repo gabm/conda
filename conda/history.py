@@ -4,13 +4,13 @@ import errno
 import json
 import logging
 import os
+from os.path import isdir, isfile, join
 import re
 import sys
 import time
 import warnings
-from os.path import isdir, isfile, join
 
-from .base.constants import DEFAULTS
+from .base.constants import DEFAULTS_CHANNEL_NAME
 from .core.linked_data import linked
 from .exceptions import CondaFileIOError, CondaHistoryError
 from .models.dist import Dist
@@ -38,7 +38,7 @@ def pretty_diff(diff):
         fn = s[1:]
         dist = Dist(fn)
         name, version, _, channel = dist.quad
-        if channel != DEFAULTS:
+        if channel != DEFAULTS_CHANNEL_NAME:
             version += ' (%s)' % channel
         if s.startswith('-'):
             removed[name.lower()] = version
@@ -89,12 +89,12 @@ class History(object):
         try:
             self.init_log_file()
             try:
-                last = self.get_state()
+                last = set(self.get_state())
             except CondaHistoryError as e:
                 warnings.warn("Error in %s: %s" % (self.path, e),
                               CondaHistoryWarning)
                 return
-            curr = set(linked(self.prefix))
+            curr = set(map(str, linked(self.prefix)))
             if last == curr:
                 # print a head when a blank env is first created to preserve history
                 if enter_or_exit == 'exit' and self.file_is_empty():
@@ -269,5 +269,6 @@ class History(object):
 
 if __name__ == '__main__':
     from pprint import pprint
-    with History(sys.prefix) as h:
-        pprint(h.get_user_requests())
+    # Don't use in context manager mode---it augments the history every time
+    h = History(sys.prefix)
+    pprint(h.get_user_requests())

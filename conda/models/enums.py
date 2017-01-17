@@ -69,6 +69,9 @@ class LinkType(Enum):
     def __str__(self):
         return self.name
 
+    def __json__(self):
+        return self.name
+
 
 class PathType(Enum):
     """
@@ -86,4 +89,7 @@ class PathType(Enum):
     windows_python_entry_point = 'windows_python_entry_point'
 
     def __str__(self):
+        return self.name
+
+    def __json__(self):
         return self.name

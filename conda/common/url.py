@@ -6,11 +6,14 @@ from logging import getLogger
 from os.path import abspath, expanduser
 import re
 import socket
-import sys
 
-from conda._vendor.auxlib.ish import dals
-from conda.exceptions import CondaValueError
 from .path import split_filename
+from .._vendor.auxlib.decorators import memoize
+from .._vendor.auxlib.ish import dals
+from .._vendor.urllib3.exceptions import LocationParseError
+from .._vendor.urllib3.util.url import Url, parse_url
+from ..common.compat import on_win
+from ..exceptions import CondaValueError
 
 try:
     # Python 3
@@ -22,14 +25,8 @@ except ImportError:
     from urllib import quote, quote_plus, unquote, unquote_plus, pathname2url  # NOQA
     from urlparse import urlunparse as stdlib_urlparse, urljoin  # NOQA
 
-from requests.packages.urllib3.exceptions import LocationParseError
-from requests.packages.urllib3.util.url import Url, parse_url
-
-from .._vendor.auxlib.decorators import memoize
 
 log = getLogger(__name__)
-
-on_win = bool(sys.platform == "win32")
 
 
 def urlunparse(data):
@@ -59,8 +56,11 @@ def urlparse(url):
 
 
 def url_to_s3_info(url):
-    """
-    Convert a S3 url to a tuple of bucket and key
+    """Convert an s3 url to a tuple of bucket and key.
+
+    Examples:
+        >>> url_to_s3_info("s3://bucket-name.bucket/here/is/the/key")
+        ('bucket-name.bucket', '/here/is/the/key')
     """
     parsed_url = parse_url(url)
     assert parsed_url.scheme == 's3', "You can only use s3: urls (not %r)" % url
@@ -221,7 +221,7 @@ def split_conda_url_easy_parts(url):
 @memoize
 def get_proxy_username_and_pass(scheme):
     username = input("\n%s proxy username: " % scheme)
-    passwd = getpass("Password:")
+    passwd = getpass("Password: ")
     return username, passwd
 
 
@@ -232,7 +232,15 @@ def add_username_and_password(url, username, password):
 
 
 def maybe_add_auth(url, auth, force=False):
-    """add auth if the url doesn't currently have it"""
+    """Add auth if the url doesn't currently have it.
+
+    By default, does not replace auth if it already exists.  Setting ``force`` to ``True``
+    overrides this behavior.
+
+    Examples:
+        >>> maybe_add_auth("https://www.conda.io", "user:passwd")
+        'https://user:passwd@www.conda.io'
+    """
     if not auth:
         return url
     url_parts = urlparse(url)._asdict()

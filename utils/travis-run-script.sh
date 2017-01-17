@@ -24,7 +24,7 @@ main_test() {
     echo $PYTHONHASHSEED
 
     # basic unit tests
-    python -m pytest --cov-report xml --shell=bash --shell=zsh -m "not installed" tests
+    python -m pytest --cov-report xml --shell=bash --shell=zsh -m "not installed" conda tests
     python utils/setup-testing.py --version
 }
 
@@ -55,7 +55,7 @@ conda_build_unit_test() {
     echo
     echo ">>>>>>>>>>>> running conda-build unit tests >>>>>>>>>>>>>>>>>>>>>"
     echo
-    python -m pytest -n 2 --basetemp /tmp/cb tests || echo -e "\n>>>>> conda-build tests exited with code" $? "\n\n\n"
+    ~/miniconda/bin/python -m pytest --basetemp /tmp/cb tests || echo -e "\n>>>>> conda-build tests exited with code" $? "\n\n\n"
     popd
 }
 

@@ -7,6 +7,9 @@ from warnings import warn
 
 log = getLogger(__name__)
 
+from . import CondaError  # NOQA
+CondaError = CondaError
+
 from . import compat, plan  # NOQA
 compat, plan = compat, plan
 
@@ -32,8 +35,8 @@ from .fetch import TmpDownload  # NOQA
 TmpDownload = TmpDownload
 handle_proxy_407 = lambda x, y: warn("handle_proxy_407 is deprecated. "
                                      "Now handled by CondaSession.")
-from .core.index import fetch_index  # NOQA
-fetch_index = fetch_index
+from .core.index import dist_str_in_index, fetch_index  # NOQA
+dist_str_in_index, fetch_index = dist_str_in_index, fetch_index
 from .core.package_cache import download, rm_fetched  # NOQA
 download, rm_fetched = download, rm_fetched
 
@@ -74,9 +77,10 @@ import conda.base.context  # NOQA
 from conda.base.context import get_prefix as context_get_prefix, non_x86_linux_machines  # NOQA
 non_x86_linux_machines = non_x86_linux_machines
 
-from .base.constants import DEFAULT_CHANNELS       # NOQA
 from ._vendor.auxlib.entity import EntityEncoder        # NOQA
 EntityEncoder = EntityEncoder
+from .base.constants import DEFAULT_CHANNELS, DEFAULT_CHANNELS_WIN, DEFAULT_CHANNELS_UNIX  # NOQA
+DEFAULT_CHANNELS, DEFAULT_CHANNELS_WIN, DEFAULT_CHANNELS_UNIX = DEFAULT_CHANNELS, DEFAULT_CHANNELS_WIN, DEFAULT_CHANNELS_UNIX  # NOQA
 get_prefix = partial(context_get_prefix, conda.base.context.context)
 get_default_urls = lambda: DEFAULT_CHANNELS
 
