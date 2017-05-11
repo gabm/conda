@@ -17,7 +17,7 @@
 
 .. image:: https://img.shields.io/codecov/c/github/conda/conda/4.3.x.svg?label=coverage
    :alt: Codecov Status
-   :target: https://codecov.io/github/conda/conda?branch=master
+   :target: https://codecov.io/gh/conda/conda/branch/4.3.x
 
 .. image:: https://img.shields.io/github/release/conda/conda.svg
    :alt: latest release version
@@ -31,7 +31,7 @@
 
 |
 
-Conda is a cross-platform, Python-agnostic binary package manager. It is the
+Conda is a cross-platform, language-agnostic binary package manager. It is the
 package manager used by `Anaconda
 <http://docs.continuum.io/anaconda/index.html>`_ installations, but it may be
 used for other systems as well.  Conda makes environments first-class
@@ -39,7 +39,9 @@ citizens, making it easy to create independent environments even for C
 libraries. Conda is written entirely in Python, and is BSD licensed open
 source.
 
-Conda is enhanced by organizations, tools, and repositories created and managed by the amazing members of the conda community.  Some of them can be found `here <https://github.com/conda/conda/wiki/Conda-Community>`_.
+Conda is enhanced by organizations, tools, and repositories created and managed by
+the amazing members of the conda community.  Some of them can be found
+`here <https://github.com/conda/conda/wiki/Conda-Community>`_.
 
 
 Installation

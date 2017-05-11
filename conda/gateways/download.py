@@ -2,18 +2,21 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import hashlib
-from logging import getLogger
-from os.path import exists, basename
+from logging import DEBUG, getLogger
+from os.path import basename, exists
 from threading import Lock
 import warnings
 
-from requests.exceptions import ConnectionError, HTTPError, SSLError
+from requests.exceptions import ConnectionError, HTTPError, InvalidSchema, SSLError
 
 from .. import CondaError
 from .._vendor.auxlib.ish import dals
+from .._vendor.auxlib.logz import stringify
 from ..base.context import context
+from ..common.compat import text_type
 from ..connection import CondaSession
-from ..exceptions import BasicClobberError, CondaHTTPError, MD5MismatchError, maybe_raise
+from ..exceptions import (BasicClobberError, CondaDependencyError, CondaHTTPError,
+                          MD5MismatchError, maybe_raise)
 
 log = getLogger(__name__)
 
@@ -52,7 +55,7 @@ def download(url, target_full_path, md5sum):
     content_length = None
 
     if exists(target_full_path):
-        maybe_raise(BasicClobberError(target_full_path, url, context))
+        maybe_raise(BasicClobberError(target_full_path, url, context), context)
 
     if not context.ssl_verify:
         disable_ssl_verify_warning()
@@ -61,6 +64,8 @@ def download(url, target_full_path, md5sum):
         timeout = context.remote_connect_timeout_secs, context.remote_read_timeout_secs
         with SingleThreadCondaSession() as session:
             resp = session.get(url, stream=True, proxies=session.proxies, timeout=timeout)
+            if log.isEnabledFor(DEBUG):
+                log.debug(stringify(resp))
             resp.raise_for_status()
 
             content_length = int(resp.headers.get('Content-Length', 0))
@@ -73,7 +78,9 @@ def download(url, target_full_path, md5sum):
                 with open(target_full_path, 'wb') as fh:
                     streamed_bytes = 0
                     for chunk in resp.iter_content(2 ** 14):
-                        streamed_bytes += len(chunk)
+                        # chunk could be the decompressed form of the real data
+                        # but we want the exact number of bytes read till now
+                        streamed_bytes = resp.raw.tell()
                         try:
                             fh.write(chunk)
                         except IOError as e:
@@ -95,10 +102,9 @@ def download(url, target_full_path, md5sum):
                       Content-Length: %(content_length)d
                       downloaded bytes: %(downloaded_bytes)d
                     """)
-                    # raise CondaError(message, url=url, target_path=target_full_path,
-                    #                  content_length=content_length,
-                    #                  downloaded_bytes=streamed_bytes)
-                    log.info(message)
+                    raise CondaError(message, url=url, target_path=target_full_path,
+                                     content_length=content_length,
+                                     downloaded_bytes=streamed_bytes)
 
             except (IOError, OSError) as e:
                 if e.errno == 104:
@@ -106,22 +112,36 @@ def download(url, target_full_path, md5sum):
                     log.debug("%s, trying again" % e)
                 raise
 
-        if md5sum and digest_builder.hexdigest() != md5sum:
+        actual_md5sum = digest_builder.hexdigest()
+        if md5sum and actual_md5sum != md5sum:
             log.debug("MD5 sums mismatch for download: %s (%s != %s), "
                       "trying again" % (url, digest_builder.hexdigest(), md5sum))
-            # TODO: refactor this exception
-            raise MD5MismatchError("MD5 sums mismatch for download: %s (%s != %s)"
-                                   % (url, digest_builder.hexdigest(), md5sum))
+            raise MD5MismatchError(url, target_full_path, md5sum, actual_md5sum)
+
+    except InvalidSchema as e:
+        if 'SOCKS' in text_type(e):
+            message = dals("""
+                Requests has identified that your current working environment is configured
+                to use a SOCKS proxy, but pysocks is not installed.  To proceed, remove your
+                proxy configuration, run `conda install pysocks`, and then you can re-enable
+                your proxy configuration.
+                """)
+            raise CondaDependencyError(message)
+        else:
+            raise
 
     except (ConnectionError, HTTPError, SSLError) as e:
-        # status_code might not exist on SSLError
-        help_message = "An HTTP error occurred when trying to retrieve this URL.\n%r" % e
+        help_message = dals("""
+        An HTTP error occurred when trying to retrieve this URL.
+        HTTP errors are often intermittent, and a simple retry will get you on your way.
+        """)
         raise CondaHTTPError(help_message,
-                             getattr(e.response, 'url', None),
+                             url,
                              getattr(e.response, 'status_code', None),
                              getattr(e.response, 'reason', None),
-                             getattr(e.response, 'elapsed', None))
-
+                             getattr(e.response, 'elapsed', None),
+                             e.response,
+                             caused_by=e)
     finally:
         if content_length:
             getLogger('fetch.stop').info(None)
